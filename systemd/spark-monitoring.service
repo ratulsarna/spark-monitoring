@@ -1,0 +1,20 @@
+[Unit]
+Description=Spark model-serving monitoring
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+WorkingDirectory={{CHECKOUT_DIRECTORY}}
+ExecStart="{{CHECKOUT_ROOT}}/bin/monitoring" up
+ExecReload="{{CHECKOUT_ROOT}}/bin/monitoring" reload
+ExecStop="{{CHECKOUT_ROOT}}/bin/monitoring" down
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=180
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

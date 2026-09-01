@@ -1,0 +1,13 @@
+apiVersion: 1
+
+providers:
+  - name: Qwen3.8 Spark
+    orgId: 1
+    folder: DGX Spark
+    folderUid: dgx-spark
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards

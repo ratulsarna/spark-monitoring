@@ -1,0 +1,20 @@
+storage:
+  prometheus_volume: spark-monitoring_prometheus-data
+  grafana_volume: spark-monitoring_grafana-data
+
+grafana:
+  serve_host: monitoring-node.example.invalid
+  serve_port: 8443
+spark_b:
+  host: spark-b.example.invalid
+  gateway_port: 443
+  llamacpp_proxy_port: 32101
+  vllm_proxy_port: 32102
+rd_legion:
+  host: rd-legion.example.invalid
+  gateway_port: 1234
+  worker_ports:
+    kat-coder-v2.5-dev: 5800
+    qwen38-27b-128k: 5801
+    qwen38-27b-obliterated: 5802
+    qwen38-27b-orca-uncensored: 5803

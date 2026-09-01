@@ -1,0 +1,271 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "pluginVersion": "13.1.3",
+      "targets": [{"editorMode": "code", "expr": "max by (node) (up{service=\"model-gateway\",node=~\"$node\"} or up{service=\"model-worker\",node=\"rd-legion\",node=~\"$node\"})", "instant": true, "legendFormat": "{{node}}", "range": false, "refId": "A"}],
+      "title": "Serving nodes ready",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "continuous-GrYlRd"}, "decimals": 1, "mappings": [], "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 5, "x": 4, "y": 0},
+      "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "pluginVersion": "13.1.3",
+      "targets": [{"editorMode": "code", "expr": "sum(sglang:gen_throughput{model=~\"$model\",node=~\"$node\"} or llamacpp:predicted_tokens_seconds{model=~\"$model\",node=~\"$node\"} or deepseek_vllm_live_generation_throughput_tokens_per_second{model=~\"$model\",node=~\"$node\"} or rate(vllm:generation_tokens_total{model=~\"$model\",node=~\"$node\"}[$__rate_interval])) or vector(0)", "instant": true, "legendFormat": "decode tok/s", "range": false, "refId": "A"}],
+      "title": "Decode throughput (tok/s)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "continuous-GrYlRd"}, "decimals": 1, "mappings": [], "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 5, "x": 9, "y": 0},
+      "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "pluginVersion": "13.1.3",
+      "targets": [{"editorMode": "code", "expr": "sum(rate(sglang:realtime_tokens_total{mode=\"prefill_compute\",model=~\"$model\",node=~\"$node\"}[$__rate_interval]) or llamacpp:prompt_tokens_seconds{model=~\"$model\",node=~\"$node\"} or deepseek_vllm_live_prompt_throughput_tokens_per_second{model=~\"$model\",node=~\"$node\"} or rate(vllm:prompt_tokens_by_source_total{source=\"local_compute\",model=~\"$model\",node=~\"$node\"}[$__rate_interval])) or vector(0)", "instant": true, "legendFormat": "prefill tok/s", "range": false, "refId": "A"}],
+      "title": "Prefill throughput (tok/s)",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "decimals": 0, "mappings": [], "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 5, "x": 14, "y": 0},
+      "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "pluginVersion": "13.1.3",
+      "targets": [{"editorMode": "code", "expr": "sum(sglang:num_running_reqs{model=~\"$model\",node=~\"$node\"} or llamacpp:requests_processing{model=~\"$model\",node=~\"$node\"} or vllm:num_requests_running{model=~\"$model\",node=~\"$node\"}) or vector(0)", "instant": true, "legendFormat": "running", "range": false, "refId": "A"}],
+      "title": "Running requests",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "decimals": 0, "mappings": [], "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 5, "x": 19, "y": 0},
+      "id": 5,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "pluginVersion": "13.1.3",
+      "targets": [{"editorMode": "code", "expr": "sum(sglang:num_queue_reqs{model=~\"$model\",node=~\"$node\"} or llamacpp:requests_deferred{model=~\"$model\",node=~\"$node\"} or vllm:num_requests_waiting{model=~\"$model\",node=~\"$node\"}) or vector(0)", "instant": true, "legendFormat": "queued", "range": false, "refId": "A"}],
+      "title": "Queued requests",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "id": 6,
+      "options": {"legend": {"calcs": ["lastNotNull", "mean"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "pluginVersion": "13.1.3",
+      "targets": [
+        {"editorMode": "code", "expr": "sglang:gen_throughput{model=~\"$model\",node=~\"$node\"}", "legendFormat": "{{node}} · {{model}} · decode", "range": true, "refId": "A"},
+        {"editorMode": "code", "expr": "llamacpp:predicted_tokens_seconds{model=~\"$model\",node=~\"$node\"}", "legendFormat": "{{node}} · {{model}} · decode", "range": true, "refId": "B"},
+        {"editorMode": "code", "expr": "sum by (node, model) (rate(sglang:realtime_tokens_total{mode=\"prefill_compute\",model=~\"$model\",node=~\"$node\"}[$__rate_interval]))", "legendFormat": "{{node}} · {{model}} · prefill", "range": true, "refId": "C"},
+        {"editorMode": "code", "expr": "llamacpp:prompt_tokens_seconds{model=~\"$model\",node=~\"$node\"}", "legendFormat": "{{node}} · {{model}} · prefill", "range": true, "refId": "D"},
+        {"editorMode": "code", "expr": "sum by (node, model) (deepseek_vllm_live_generation_throughput_tokens_per_second{model=~\"$model\",node=~\"$node\"})", "legendFormat": "{{node}} · {{model}} · decode", "range": true, "refId": "E"},
+        {"editorMode": "code", "expr": "sum by (node, model) (deepseek_vllm_live_prompt_throughput_tokens_per_second{model=~\"$model\",node=~\"$node\"})", "legendFormat": "{{node}} · {{model}} · prefill", "range": true, "refId": "F"},
+        {"editorMode": "code", "expr": "sum by (node, model) (rate(vllm:generation_tokens_total{model=~\"$model\",node=~\"$node\"}[$__rate_interval]))", "legendFormat": "{{node}} · {{model}} · vLLM decode", "range": true, "refId": "G"},
+        {"editorMode": "code", "expr": "sum by (node, model) (rate(vllm:prompt_tokens_by_source_total{source=\"local_compute\",model=~\"$model\",node=~\"$node\"}[$__rate_interval]))", "legendFormat": "{{node}} · {{model}} · vLLM prefill", "range": true, "refId": "H"}
+      ],
+      "title": "Throughput by active model",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "id": 7,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "pluginVersion": "13.1.3",
+      "targets": [
+        {"editorMode": "code", "expr": "sglang:num_running_reqs{model=~\"$model\",node=~\"$node\"}", "legendFormat": "{{node}} · {{model}} · running", "range": true, "refId": "A"},
+        {"editorMode": "code", "expr": "sglang:num_queue_reqs{model=~\"$model\",node=~\"$node\"}", "legendFormat": "{{node}} · {{model}} · queued", "range": true, "refId": "B"},
+        {"editorMode": "code", "expr": "llamacpp:requests_processing{model=~\"$model\",node=~\"$node\"}", "legendFormat": "{{node}} · {{model}} · running", "range": true, "refId": "C"},
+        {"editorMode": "code", "expr": "llamacpp:requests_deferred{model=~\"$model\",node=~\"$node\"}", "legendFormat": "{{node}} · {{model}} · queued", "range": true, "refId": "D"},
+        {"editorMode": "code", "expr": "vllm:num_requests_running{model=~\"$model\",node=~\"$node\"}", "legendFormat": "{{node}} · {{model}} · vLLM running", "range": true, "refId": "E"},
+        {"editorMode": "code", "expr": "vllm:num_requests_waiting{model=~\"$model\",node=~\"$node\"}", "legendFormat": "{{node}} · {{model}} · vLLM queued", "range": true, "refId": "F"}
+      ],
+      "title": "Scheduler activity",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true}, "max": 1, "min": 0, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "id": 8,
+      "options": {"legend": {"calcs": ["lastNotNull", "mean"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "pluginVersion": "13.1.3",
+      "targets": [
+        {"editorMode": "code", "expr": "sglang:spec_accept_rate{model=~\"$model\",node=~\"$node\"}", "legendFormat": "{{node}} · {{model}} · SGLang", "range": true, "refId": "A"},
+        {"editorMode": "code", "expr": "sum by (node, model) (rate(llamacpp:spec_decode_num_accepted_tokens_total{model=~\"$model\",node=~\"$node\"}[$__rate_interval])) / clamp_min(sum by (node, model) (rate(llamacpp:spec_decode_num_draft_tokens_total{model=~\"$model\",node=~\"$node\"}[$__rate_interval])), 0.000001)", "legendFormat": "{{node}} · {{model}} · llama.cpp", "range": true, "refId": "B"},
+        {"editorMode": "code", "expr": "sum by (node, model) (rate(vllm:spec_decode_num_accepted_tokens_total{model=~\"$model\",node=~\"$node\"}[$__rate_interval])) / clamp_min(sum by (node, model) (rate(vllm:spec_decode_num_draft_tokens_total{model=~\"$model\",node=~\"$node\"}[$__rate_interval])), 0.000001)", "legendFormat": "{{node}} · {{model}} · vLLM", "range": true, "refId": "C"}
+      ],
+      "title": "MTP acceptance",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true}, "max": 1, "min": 0, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 12},
+      "id": 9,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "pluginVersion": "13.1.3",
+      "targets": [
+        {"editorMode": "code", "expr": "llamaswap_memory_used_bytes{service=\"model-gateway\",node=~\"$node\"} / llamaswap_memory_total_bytes{service=\"model-gateway\",node=~\"$node\"}", "legendFormat": "{{node}} · unified RAM used", "range": true, "refId": "A"},
+        {"editorMode": "code", "expr": "avg by (node) (llamaswap_cpu_util_percent{service=\"model-gateway\",node=~\"$node\"}) / 100", "legendFormat": "{{node}} · CPU used", "range": true, "refId": "B"}
+      ],
+      "title": "Host resource pressure",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "continuous-GrYlRd"}, "decimals": 1, "mappings": [], "max": 1, "min": 0, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 4, "x": 12, "y": 12},
+      "id": 14,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "pluginVersion": "13.1.3",
+      "targets": [{"editorMode": "code", "expr": "max(vllm:kv_cache_usage_perc{model=~\"$model\",node=~\"$node\"}) or vector(0)", "instant": true, "legendFormat": "KV cache", "range": false, "refId": "A"}],
+      "title": "vLLM KV cache usage",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true}, "max": 1, "min": 0, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 20},
+      "id": 11,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "pluginVersion": "13.1.3",
+      "targets": [{"editorMode": "code", "expr": "llamaswap_gpu_util_percent{service=\"model-gateway\",node=~\"$node\"} / 100", "legendFormat": "{{node}}", "range": true, "refId": "A"}],
+      "title": "GPU utilization",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true}, "min": 0, "unit": "watt"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 20},
+      "id": 12,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "pluginVersion": "13.1.3",
+      "targets": [{"editorMode": "code", "expr": "llamaswap_gpu_power_draw_watts{service=\"model-gateway\",node=~\"$node\"}", "legendFormat": "{{node}}", "range": true, "refId": "A"}],
+      "title": "GPU power",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "continuous-GrYlRd"}, "custom": {"drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true}, "min": 0, "unit": "celsius"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 20},
+      "id": 13,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "pluginVersion": "13.1.3",
+      "targets": [{"editorMode": "code", "expr": "llamaswap_gpu_temperature_celsius{service=\"model-gateway\",node=~\"$node\"}", "legendFormat": "{{node}}", "range": true, "refId": "A"}],
+      "title": "GPU temperature",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "smooth", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true}, "min": 0, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 27},
+      "id": 15,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "pluginVersion": "13.1.3",
+      "targets": [
+        {"editorMode": "code", "expr": "sum by (node, model) (rate(sglang:num_requests_total{model=~\"$model\",node=~\"$node\"}[$__rate_interval]))", "legendFormat": "{{node}} · {{model}} · SGLang", "range": true, "refId": "A"},
+        {"editorMode": "code", "expr": "sum by (node, model) (rate(vllm:e2e_request_latency_seconds_count{model=~\"$model\",node=~\"$node\"}[$__rate_interval]))", "legendFormat": "{{node}} · {{model}} · vLLM", "range": true, "refId": "B"}
+      ],
+      "title": "Completed request rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "custom": {"drawStyle": "line", "fillOpacity": 20, "lineInterpolation": "stepAfter", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true}, "max": 1, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 41},
+      "id": 10,
+      "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "pluginVersion": "13.1.3",
+      "targets": [{"editorMode": "code", "expr": "up{service=~\"model-gateway|model-worker\",model=~\"$model|\",node=~\"$node\"}", "legendFormat": "{{node}} · {{job}} · {{model}}", "range": true, "refId": "A"}],
+      "title": "Cluster gateway and worker availability (inactive worker = unloaded)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 12, "lineInterpolation": "stepAfter", "lineWidth": 2, "pointSize": 5, "showPoints": "never", "spanNulls": true}, "min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 34},
+      "id": 16,
+      "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "pluginVersion": "13.1.3",
+      "targets": [{"editorMode": "code", "expr": "sum by (node, model) (vllm:num_preemptions_total{model=~\"$model\",node=~\"$node\"})", "legendFormat": "{{node}} · {{model}}", "range": true, "refId": "A"}],
+      "title": "vLLM preemptions",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "2s",
+  "schemaVersion": 41,
+  "tags": ["model-serving", "llama-swap", "dgx-spark", "multi-engine", "multi-node"],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {"text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "definition": "label_values(up{service=~\"model-gateway|model-worker\"}, node)",
+        "includeAll": true,
+        "label": "Node",
+        "multi": true,
+        "name": "node",
+        "options": [],
+        "query": {"query": "label_values(up{service=~\"model-gateway|model-worker\"}, node)", "refId": "PrometheusVariableQueryEditor-Node"},
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {"text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "definition": "label_values({service=\"model-worker\",node=~\"$node\"}, model)",
+        "includeAll": true,
+        "label": "Model",
+        "multi": true,
+        "name": "model",
+        "options": [],
+        "query": {"query": "label_values({service=\"model-worker\",node=~\"$node\"}, model)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {"from": "now-15m", "to": "now"},
+  "timepicker": {
+    "refresh_intervals": ["2s", "5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"]
+  },
+  "timezone": "browser",
+  "title": "Model Serving · DGX Spark Cluster",
+  "uid": "spark-models",
+  "version": 8
+}

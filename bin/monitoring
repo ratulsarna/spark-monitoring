@@ -1,0 +1,945 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 077
+
+root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+compose_file=$root_dir/compose.yml
+site_config=$root_dir/site.yml
+prometheus_config=$root_dir/prometheus.yml
+prometheus_template=$root_dir/prometheus.yml.example
+runtime_dir=$root_dir/.local
+unit_template=$root_dir/systemd/spark-monitoring.service
+unit_source=$runtime_dir/spark-monitoring.service
+unit_name=spark-monitoring.service
+user_config_dir=${XDG_CONFIG_HOME:-$HOME/.config}
+unit_target=$user_config_dir/systemd/user/$unit_name
+site_config_loaded=false
+prometheus_container=spark-monitoring-prometheus
+grafana_container=spark-monitoring-grafana
+node_container=spark-monitoring-node-exporter
+spark_a_gateway_url=http://127.0.0.1:30000
+prometheus_url=http://127.0.0.1:9090
+grafana_url=http://127.0.0.1:3100
+
+log() { printf 'spark-monitoring: %s\n' "$*"; }
+fail() { printf 'spark-monitoring: ERROR: %s\n' "$*" >&2; return 1; }
+
+usage() {
+  printf 'Usage: %s {validate|initialize|install|status|reload}\n' "$0" >&2
+  exit 2
+}
+
+require_commands() {
+  local command
+  for command in curl docker id jq loginctl python3 stat systemctl systemd-analyze tailscale; do
+    command -v "$command" >/dev/null || fail "missing command: $command"
+  done
+  docker compose version >/dev/null
+}
+
+load_site_config() {
+  local site_json mode
+  [[ $site_config_loaded == false ]] || return 0
+  [[ -f $site_config && ! -L $site_config ]] || {
+    fail "site config is missing; copy site.example.yml to site.yml"
+    return 1
+  }
+  mode=$(stat -c '%a' "$site_config")
+  [[ $mode == 600 ]] || {
+    fail "site config must be private; run: chmod 600 $site_config"
+    return 1
+  }
+  site_json=$(python3 - "$site_config" <<'PY'
+import json
+import re
+import sys
+import yaml
+
+if sys.flags.optimize:
+    raise SystemExit("Python assertions must be enabled")
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    site = yaml.safe_load(stream)
+
+def host(value):
+    assert isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9.-]+", value)
+    return value
+
+def port(value):
+    assert isinstance(value, int) and 1 <= value <= 65535
+    return value
+
+def volume(value):
+    assert isinstance(value, str) and len(value) <= 255
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value)
+    return value
+
+workers = site["rd_legion"]["worker_ports"]
+required_workers = {
+    "kat-coder-v2.5-dev",
+    "qwen38-27b-128k",
+    "qwen38-27b-obliterated",
+    "qwen38-27b-orca-uncensored",
+}
+assert set(workers) == required_workers
+prometheus_volume = volume(site["storage"]["prometheus_volume"])
+grafana_volume = volume(site["storage"]["grafana_volume"])
+assert prometheus_volume != grafana_volume
+validated = {
+    "storage": {
+        "prometheus_volume": prometheus_volume,
+        "grafana_volume": grafana_volume,
+    },
+    "grafana": {
+        "serve_host": host(site["grafana"]["serve_host"]),
+        "serve_port": port(site["grafana"]["serve_port"]),
+    },
+    "spark_b": {
+        "host": host(site["spark_b"]["host"]),
+        "gateway_port": port(site["spark_b"]["gateway_port"]),
+        "llamacpp_proxy_port": port(site["spark_b"]["llamacpp_proxy_port"]),
+        "vllm_proxy_port": port(site["spark_b"]["vllm_proxy_port"]),
+    },
+    "rd_legion": {
+        "host": host(site["rd_legion"]["host"]),
+        "gateway_port": port(site["rd_legion"]["gateway_port"]),
+        "worker_ports": {key: port(workers[key]) for key in sorted(required_workers)},
+    },
+}
+print(json.dumps(validated, separators=(",", ":")))
+PY
+  ) || {
+    fail "site config is invalid: $site_config"
+    return 1
+  }
+
+  prometheus_volume=$(jq -er '.storage.prometheus_volume' <<<"$site_json")
+  grafana_volume=$(jq -er '.storage.grafana_volume' <<<"$site_json")
+  grafana_serve_host=$(jq -er '.grafana.serve_host' <<<"$site_json")
+  grafana_serve_port=$(jq -er '.grafana.serve_port' <<<"$site_json")
+  spark_b_host=$(jq -er '.spark_b.host' <<<"$site_json")
+  spark_b_gateway_port=$(jq -er '.spark_b.gateway_port' <<<"$site_json")
+  spark_b_llamacpp_proxy_port=$(jq -er '.spark_b.llamacpp_proxy_port' <<<"$site_json")
+  spark_b_vllm_proxy_port=$(jq -er '.spark_b.vllm_proxy_port' <<<"$site_json")
+  rd_host=$(jq -er '.rd_legion.host' <<<"$site_json")
+  rd_gateway_port=$(jq -er '.rd_legion.gateway_port' <<<"$site_json")
+  rd_kat_coder_port=$(jq -er '.rd_legion.worker_ports["kat-coder-v2.5-dev"]' <<<"$site_json")
+  rd_qwen_128k_port=$(jq -er '.rd_legion.worker_ports["qwen38-27b-128k"]' <<<"$site_json")
+  rd_qwen_obliterated_port=$(jq -er '.rd_legion.worker_ports["qwen38-27b-obliterated"]' <<<"$site_json")
+  rd_qwen_orca_port=$(jq -er '.rd_legion.worker_ports["qwen38-27b-orca-uncensored"]' <<<"$site_json")
+  spark_b_gateway_url="https://${spark_b_host}:${spark_b_gateway_port}"
+  rd_gateway_url="http://${rd_host}:${rd_gateway_port}"
+  grafana_public_url="https://${grafana_serve_host}:${grafana_serve_port}"
+  site_config_loaded=true
+}
+
+render_runtime_files() {
+  local action=$1
+  python3 - "$action" "$root_dir" "$site_config" "$prometheus_template" "$prometheus_config" \
+    "$unit_template" "$unit_source" <<'PY'
+import os
+import pathlib
+import sys
+import tempfile
+import yaml
+
+action, root_value, site_value, prom_template_value, prom_output_value, unit_template_value, unit_output_value = sys.argv[1:]
+root = pathlib.Path(root_value)
+with open(site_value, encoding="utf-8") as stream:
+    site = yaml.safe_load(stream)
+
+replacements = {
+    "SPARK_B_HOST": site["spark_b"]["host"],
+    "SPARK_B_GATEWAY_PORT": site["spark_b"]["gateway_port"],
+    "RD_LEGION_HOST": site["rd_legion"]["host"],
+    "RD_GATEWAY_PORT": site["rd_legion"]["gateway_port"],
+    "RD_KAT_CODER_PORT": site["rd_legion"]["worker_ports"]["kat-coder-v2.5-dev"],
+    "RD_QWEN_128K_PORT": site["rd_legion"]["worker_ports"]["qwen38-27b-128k"],
+    "RD_QWEN_OBLITERATED_PORT": site["rd_legion"]["worker_ports"]["qwen38-27b-obliterated"],
+    "RD_QWEN_ORCA_PORT": site["rd_legion"]["worker_ports"]["qwen38-27b-orca-uncensored"],
+}
+
+def render(path, values):
+    text = pathlib.Path(path).read_text(encoding="utf-8")
+    for key, value in values.items():
+        token = "{{" + key + "}}"
+        if token not in text:
+            raise SystemExit(f"missing template token: {key}")
+        text = text.replace(token, str(value))
+    if "{{" in text or "}}" in text:
+        raise SystemExit("unresolved template token")
+    return text
+
+prometheus = render(prom_template_value, replacements)
+working_root = "".join(
+    "%%" if character == "%" else character
+    if character.isascii() and (character.isalnum() or character in "/._-")
+    else "".join(f"\\x{byte:02x}" for byte in character.encode("utf-8"))
+    for character in str(root)
+)
+escaped_root = str(root).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+unit = render(unit_template_value, {"CHECKOUT_DIRECTORY": working_root, "CHECKOUT_ROOT": escaped_root})
+outputs = ((pathlib.Path(prom_output_value), prometheus, 0o644), (pathlib.Path(unit_output_value), unit, 0o600))
+
+if action == "check":
+    if any(not path.is_file() or path.is_symlink() or path.read_text(encoding="utf-8") != content
+           for path, content, _ in outputs):
+        raise SystemExit("rendered runtime files are absent or stale")
+elif action == "write":
+    pathlib.Path(unit_output_value).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(pathlib.Path(unit_output_value).parent, 0o700)
+    for path, content, mode in outputs:
+        if path.is_file() and not path.is_symlink() and path.read_text(encoding="utf-8") == content:
+            os.chmod(path, mode)
+            continue
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            stream.write(content)
+            temporary = pathlib.Path(stream.name)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+else:
+    raise SystemExit("invalid render action")
+PY
+}
+
+serve_mapping_valid() {
+  local serve_json=$1 web_key
+  web_key="${grafana_serve_host}:${grafana_serve_port}"
+  jq -e --arg port "$grafana_serve_port" --arg key "$web_key" '
+    .TCP[$port] == {"HTTPS": true} and
+    .Web[$key].Handlers == {"/": {"Proxy": "http://127.0.0.1:3100"}}
+  ' <<<"$serve_json" >/dev/null
+}
+
+verify_serve_prerequisite() {
+  local serve_json
+  serve_json=$(tailscale serve status --json) || {
+    fail 'cannot read Tailscale Serve configuration'
+    return 1
+  }
+  serve_mapping_valid "$serve_json" || {
+    fail "Grafana Serve prerequisite is missing; run: tailscale serve --bg --https=$grafana_serve_port http://127.0.0.1:3100"
+    return 1
+  }
+}
+
+linger_enabled() {
+  [[ $1 == yes ]]
+}
+
+verify_linger_prerequisite() {
+  local monitoring_user linger
+  monitoring_user=$(id -un)
+  linger=$(loginctl show-user "$monitoring_user" --property=Linger --value) || {
+    fail "cannot read linger state for user: $monitoring_user"
+    return 1
+  }
+  linger_enabled "$linger" || {
+    fail "user lingering is disabled; run: sudo loginctl enable-linger $monitoring_user"
+    return 1
+  }
+}
+
+compose() {
+  GRAFANA_SERVE_HOST=$grafana_serve_host GRAFANA_SERVE_PORT=$grafana_serve_port \
+    PROMETHEUS_VOLUME_NAME=$prometheus_volume GRAFANA_VOLUME_NAME=$grafana_volume \
+    docker compose -f "$compose_file" "$@"
+}
+
+shutdown_compose() {
+  GRAFANA_SERVE_HOST=unused.example.invalid GRAFANA_SERVE_PORT=443 \
+    PROMETHEUS_VOLUME_NAME=unused-prometheus-data GRAFANA_VOLUME_NAME=unused-grafana-data \
+    docker compose -f "$compose_file" "$@"
+}
+
+require_volumes() {
+  docker volume inspect "$prometheus_volume" "$grafana_volume" >/dev/null || {
+    fail 'persistent volumes are absent; initialize an empty deployment first'
+    return 1
+  }
+}
+
+validate_provisioning() {
+  python3 - "$root_dir" "$site_config" <<'PY'
+import json
+import pathlib
+import sys
+
+import yaml
+
+if sys.flags.optimize:
+    raise SystemExit("Python assertions must be enabled")
+
+root = pathlib.Path(sys.argv[1])
+with open(sys.argv[2], encoding="utf-8") as stream:
+    site = yaml.safe_load(stream)
+spark_b_target = f'{site["spark_b"]["host"]}:{site["spark_b"]["gateway_port"]}'
+rd_target = f'{site["rd_legion"]["host"]}:{site["rd_legion"]["gateway_port"]}'
+rd_worker_targets = {
+    model: f'{site["rd_legion"]["host"]}:{port}'
+    for model, port in site["rd_legion"]["worker_ports"].items()
+}
+prometheus = yaml.safe_load((root / "prometheus.yml").read_text(encoding="utf-8"))
+jobs = {job["job_name"]: job for job in prometheus["scrape_configs"]}
+expected_jobs = {
+    "deepseek-live-throughput-spark-b",
+    "llama-swap",
+    "llama-swap-rd-legion",
+    "llama-swap-spark-b",
+    "llamacpp",
+    "llamacpp-rd-legion",
+    "llamacpp-spark-b",
+    "node",
+    "sglang",
+    "sglang-orca-nvfp4",
+    "vllm-deepseek-v4-flash-2x",
+    "vllm-glm53-exl3-2x",
+    "vllm-qwen38-flash-next-2x",
+    "vllm-spark-b",
+}
+assert set(jobs) == expected_jobs
+assert prometheus["global"]["external_labels"] == {"cluster": "dgx-spark"}
+
+
+def assert_single(name, target, labels, *, scheme=None, path="/metrics"):
+    job = jobs[name]
+    assert job.get("scheme", "http") == (scheme or "http")
+    assert job.get("metrics_path", "/metrics") == path
+    assert job["static_configs"] == [{"targets": [target], "labels": labels}]
+
+
+assert_single("llama-swap", "127.0.0.1:30000", {"service": "model-gateway", "node": "spark-a"})
+assert_single(
+    "llama-swap-spark-b",
+    spark_b_target,
+    {"service": "model-gateway", "node": "spark-b"},
+    scheme="https",
+)
+assert_single(
+    "llama-swap-rd-legion",
+    rd_target,
+    {"service": "model-gateway", "node": "rd-legion"},
+)
+assert_single("node", "127.0.0.1:9100", {"service": "host", "node": "spark-a"})
+assert_single(
+    "sglang",
+    "127.0.0.1:32100",
+    {"service": "model-worker", "model": "qwen3.8-27b", "engine": "sglang", "node": "spark-a"},
+)
+assert_single(
+    "sglang-orca-nvfp4",
+    "127.0.0.1:32106",
+    {
+        "service": "model-worker",
+        "model": "qwen3.8-27b-uncensored-nvfp4",
+        "engine": "sglang",
+        "node": "spark-a",
+    },
+)
+assert_single(
+    "vllm-qwen38-flash-next-2x",
+    "127.0.0.1:32104",
+    {"service": "model-worker", "model": "qwen3.8-flash-next", "engine": "vllm", "node": "spark-a"},
+)
+assert_single(
+    "llamacpp",
+    "127.0.0.1:32101",
+    {"service": "model-worker", "model": "qwen3.8-27b-uncensored", "engine": "llamacpp", "node": "spark-a"},
+)
+
+deepseek = jobs["vllm-deepseek-v4-flash-2x"]
+assert deepseek["static_configs"] == [{
+    "targets": ["127.0.0.1:32102"],
+    "labels": {"service": "model-worker", "engine": "vllm", "node": "spark-a"},
+}]
+assert deepseek["metric_relabel_configs"] == [{
+    "source_labels": ["model_name"],
+    "regex": "(deepseek-v4-flash-(0731|vision-exp)(-abliterated)?)",
+    "target_label": "model",
+    "replacement": "$1",
+}]
+
+glm = jobs["vllm-glm53-exl3-2x"]
+assert glm["static_configs"] == [{
+    "targets": ["127.0.0.1:32105"],
+    "labels": {"service": "model-worker", "model": "glm-5.3-flash-exl3", "engine": "vllm", "node": "spark-a"},
+}]
+assert glm["metric_relabel_configs"] == [{
+    "source_labels": ["model_name"],
+    "regex": r"(glm-5\.3-flash-exl3(-abliterated)?)",
+    "target_label": "model",
+    "replacement": "$1",
+}]
+
+assert_single(
+    "llamacpp-spark-b",
+    spark_b_target,
+    {"service": "model-worker", "model": "spark-b/qwen3.8-27b-uncensored", "engine": "llamacpp", "node": "spark-b"},
+    scheme="https",
+    path="/worker-orca/metrics",
+)
+assert_single(
+    "vllm-spark-b",
+    spark_b_target,
+    {"service": "model-worker", "model": "spark-b/deepseek-v4-flash-0731", "engine": "vllm", "node": "spark-b"},
+    scheme="https",
+    path="/worker-vllm/metrics",
+)
+assert_single(
+    "deepseek-live-throughput-spark-b",
+    spark_b_target,
+    {"service": "model-throughput", "model": "spark-b/deepseek-v4-flash-0731", "engine": "vllm", "node": "spark-b"},
+    scheme="https",
+    path="/deepseek-throughput/metrics",
+)
+assert jobs["llamacpp-rd-legion"].get("metrics_path", "/metrics") == "/metrics"
+assert jobs["llamacpp-rd-legion"]["static_configs"] == [
+    {
+        "targets": [rd_worker_targets[model_id]],
+        "labels": {"service": "model-worker", "model": model, "engine": "llamacpp", "node": "rd-legion"},
+    }
+    for model_id, model in (
+        ("kat-coder-v2.5-dev", "rd-legion/kat-coder-v2.5-dev"),
+        ("qwen38-27b-128k", "rd-legion/qwen38-27b-128k"),
+        ("qwen38-27b-obliterated", "rd-legion/qwen38-27b-obliterated"),
+        ("qwen38-27b-orca-uncensored", "rd-legion/qwen38-27b-orca-uncensored"),
+    )
+]
+
+datasource = yaml.safe_load(
+    (root / "grafana/provisioning/datasources/prometheus.yml").read_text(encoding="utf-8")
+)
+source = datasource["datasources"][0]
+assert source["uid"] == "prometheus"
+assert source["url"] == "http://127.0.0.1:9090"
+assert source["isDefault"] is True
+
+provider = yaml.safe_load(
+    (root / "grafana/provisioning/dashboards/dashboards.yml").read_text(encoding="utf-8")
+)["providers"][0]
+assert provider["options"]["path"] == "/var/lib/grafana/dashboards"
+
+expected = {
+    "qwen38-spark.json": ("qwen38-spark", "Qwen3.8-27B · DGX Spark"),
+    "spark-models.json": ("spark-models", "Model Serving · DGX Spark Cluster"),
+}
+dashboards = {}
+for filename, (uid, title) in expected.items():
+    dashboard = json.loads((root / "grafana/dashboards" / filename).read_text(encoding="utf-8"))
+    assert dashboard["uid"] == uid
+    assert dashboard["title"] == title
+    assert len(dashboard["panels"]) >= 14
+    dashboards[uid] = dashboard
+
+cluster = dashboards["spark-models"]
+variables = {variable["name"]: variable for variable in cluster["templating"]["list"]}
+model_query = variables["model"]["query"]
+if isinstance(model_query, dict):
+    model_query = model_query["query"]
+assert model_query == 'label_values({service="model-worker",node=~"$node"}, model)'
+panel_expressions = {
+    panel["title"]: "\n".join(target.get("expr", "") for target in panel.get("targets", []))
+    for panel in cluster["panels"]
+}
+required_panels = {
+    "Decode throughput (tok/s)": ("sglang:gen_throughput", "llamacpp:predicted_tokens_seconds", "vllm:generation_tokens_total"),
+    "Prefill throughput (tok/s)": ("sglang:realtime_tokens_total", "llamacpp:prompt_tokens_seconds", "vllm:prompt_tokens_by_source_total"),
+    "Completed request rate": ("sglang:num_requests_total", "vllm:e2e_request_latency_seconds_count"),
+    "Queued requests": ("sglang:num_queue_reqs", "llamacpp:requests_deferred", "vllm:num_requests_waiting"),
+    "vLLM KV cache usage": ("vllm:kv_cache_usage_perc",),
+    "MTP acceptance": ("sglang:spec_accept_rate", "llamacpp:spec_decode_num_accepted_tokens_total", "vllm:spec_decode_num_accepted_tokens_total"),
+    "vLLM preemptions": ("vllm:num_preemptions_total",),
+}
+for title, metrics in required_panels.items():
+    expression = panel_expressions[title]
+    assert all(metric in expression for metric in metrics)
+PY
+}
+
+validate() {
+  local prometheus_image
+  require_commands
+  load_site_config
+  render_runtime_files check || {
+    fail 'runtime configuration is absent or stale; run install'
+    return 1
+  }
+  require_volumes
+  compose config --quiet
+  prometheus_image=$(compose config --format json | jq -er '.services.prometheus.image')
+  docker image inspect "$prometheus_image" >/dev/null 2>&1 || {
+    fail 'pinned Prometheus image is unavailable locally; install fetches the pinned images'
+    return 1
+  }
+  docker run --rm --pull never \
+    --entrypoint /bin/promtool \
+    -v "$prometheus_config:/etc/prometheus/prometheus.yml:ro" \
+    "$prometheus_image" check config /etc/prometheus/prometheus.yml >/dev/null
+  validate_provisioning
+  validate_model_policies
+  systemd-analyze verify "$unit_source" >/dev/null
+  log 'validation passed'
+}
+
+initialize() {
+  require_commands
+  load_site_config
+  local volume
+  for volume in "$prometheus_volume" "$grafana_volume"; do
+    if docker volume inspect "$volume" >/dev/null 2>&1; then
+      fail "refusing to initialize existing volume: $volume"
+      return 1
+    fi
+  done
+  docker volume create --label spark-monitoring.data=prometheus "$prometheus_volume" >/dev/null
+  docker volume create --label spark-monitoring.data=grafana "$grafana_volume" >/dev/null
+  log 'empty persistent volumes initialized'
+}
+
+wait_ready() {
+  local deadline
+  deadline=$((SECONDS + 120))
+  while ((SECONDS < deadline)); do
+    if [[ $(docker inspect -f '{{.State.Running}}' "$prometheus_container" 2>/dev/null || true) == true ]] &&
+      [[ $(docker inspect -f '{{.State.Running}}' "$grafana_container" 2>/dev/null || true) == true ]] &&
+      [[ $(docker inspect -f '{{.State.Running}}' "$node_container" 2>/dev/null || true) == true ]] &&
+      curl -fsS --max-time 3 "$prometheus_url/-/ready" >/dev/null 2>&1 &&
+      curl -fsS --max-time 3 "$grafana_url/api/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  fail 'monitoring did not become ready'
+}
+
+up() {
+  require_commands
+  load_site_config
+  render_runtime_files check || {
+    fail 'runtime configuration is absent or stale; run install'
+    return 1
+  }
+  verify_serve_prerequisite
+  require_volumes
+  if ! compose up -d --remove-orphans; then
+    if ! compose down --remove-orphans; then
+      fail 'runtime start failed and partial monitoring cleanup failed'
+      return 1
+    fi
+    fail 'runtime start failed'
+    return 1
+  fi
+  if ! wait_ready; then
+    if ! compose down --remove-orphans; then
+      fail 'monitoring readiness failed and partial monitoring cleanup failed'
+    fi
+    return 1
+  fi
+  log 'runtime ready project=spark-monitoring'
+}
+
+down() {
+  command -v docker >/dev/null || {
+    fail 'missing command: docker'
+    return 1
+  }
+  docker compose version >/dev/null || {
+    fail 'Docker Compose is unavailable'
+    return 1
+  }
+  shutdown_compose down --remove-orphans
+  log 'runtime stopped; persistent volumes retained'
+}
+
+install_unit() {
+  mkdir -p -- "$(dirname "$unit_target")"
+  install -m 0644 "$unit_source" "$unit_target"
+  systemctl --user daemon-reload
+  systemctl --user enable "$unit_name" >/dev/null
+}
+
+target_job_healthy() {
+  local targets_response=$1 job=$2
+  jq -e --arg job "$job" '
+    [.data.activeTargets[] | select(.labels.job == $job)] as $targets |
+    (($targets | length) > 0) and all($targets[]; .health == "up")
+  ' <<<"$targets_response" >/dev/null
+}
+
+target_instance_healthy() {
+  local targets_response=$1 job=$2 instance=$3
+  jq -e --arg job "$job" --arg instance "$instance" '
+    [.data.activeTargets[] |
+      select(.labels.job == $job and .labels.instance == $instance)] as $targets |
+    (($targets | length) == 1) and all($targets[]; .health == "up")
+  ' <<<"$targets_response" >/dev/null
+}
+
+model_policy() {
+  local node=$1 model=$2 local_model
+  case $node in
+    spark-a)
+      case $model in
+        qwen3.8-27b)
+          printf '%s\t%s\t%s\t%s\t%s\n' "$model" sglang 127.0.0.1:32100 sglang:num_running_reqs 32100
+          ;;
+        qwen3.8-27b-uncensored)
+          printf '%s\t%s\t%s\t%s\t%s\n' "$model" llamacpp 127.0.0.1:32101 llamacpp:requests_processing 32101
+          ;;
+        qwen3.8-27b-uncensored-nvfp4)
+          printf '%s\t%s\t%s\t%s\t%s\n' "$model" sglang-orca-nvfp4 127.0.0.1:32106 sglang:num_running_reqs 32106
+          ;;
+        qwen3.8-flash-next)
+          printf '%s\t%s\t%s\t%s\t%s\n' "$model" vllm-qwen38-flash-next-2x 127.0.0.1:32104 vllm:num_requests_running 32104
+          ;;
+        deepseek-v4-flash-0731|deepseek-v4-flash-0731-abliterated|deepseek-v4-flash-vision-exp|deepseek-v4-flash-vision-exp-abliterated)
+          printf '%s\t%s\t%s\t%s\t%s\n' "$model" vllm-deepseek-v4-flash-2x 127.0.0.1:32102 vllm:num_requests_running 32102
+          ;;
+        glm-5.3-flash-exl3|glm-5.3-flash-exl3-abliterated)
+          printf '%s\t%s\t%s\t%s\t%s\n' "$model" vllm-glm53-exl3-2x 127.0.0.1:32105 vllm:num_requests_running 32105
+          ;;
+        *) fail "no scrape policy for active worker: node=$node model=$model"; return 1 ;;
+      esac
+      ;;
+    spark-b)
+      local_model=${model#spark-b/}
+      case $local_model in
+        qwen3.8-27b-uncensored)
+          printf 'spark-b/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" llamacpp-spark-b \
+            "$spark_b_host" "$spark_b_gateway_port" llamacpp:requests_processing "$spark_b_llamacpp_proxy_port"
+          ;;
+        deepseek-v4-flash-0731)
+          printf 'spark-b/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" vllm-spark-b \
+            "$spark_b_host" "$spark_b_gateway_port" vllm:num_requests_running "$spark_b_vllm_proxy_port"
+          ;;
+        *) fail "no scrape policy for active worker: node=$node model=$model"; return 1 ;;
+      esac
+      ;;
+    rd-legion)
+      local_model=${model#rd-legion/}
+      case $local_model in
+        kat-coder-v2.5-dev)
+          printf 'rd-legion/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" llamacpp-rd-legion \
+            "$rd_host" "$rd_kat_coder_port" llamacpp:requests_processing "$rd_kat_coder_port"
+          ;;
+        qwen38-27b-128k)
+          printf 'rd-legion/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" llamacpp-rd-legion \
+            "$rd_host" "$rd_qwen_128k_port" llamacpp:requests_processing "$rd_qwen_128k_port"
+          ;;
+        qwen38-27b-obliterated)
+          printf 'rd-legion/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" llamacpp-rd-legion \
+            "$rd_host" "$rd_qwen_obliterated_port" llamacpp:requests_processing "$rd_qwen_obliterated_port"
+          ;;
+        qwen38-27b-orca-uncensored)
+          printf 'rd-legion/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" llamacpp-rd-legion \
+            "$rd_host" "$rd_qwen_orca_port" llamacpp:requests_processing "$rd_qwen_orca_port"
+          ;;
+        *) fail "no scrape policy for active worker: node=$node model=$model"; return 1 ;;
+      esac
+      ;;
+    *) fail "unknown serving node: $node"; return 1 ;;
+  esac
+}
+
+assert_model_policy() {
+  local node=$1 model=$2 expected=$3 actual
+  actual=$(model_policy "$node" "$model")
+  [[ $actual == "$expected" ]] || fail "invalid model policy: node=$node model=$model"
+}
+
+validate_model_policies() {
+  local expected
+  assert_model_policy spark-a qwen3.8-27b $'qwen3.8-27b\tsglang\t127.0.0.1:32100\tsglang:num_running_reqs\t32100'
+  assert_model_policy spark-a qwen3.8-27b-uncensored $'qwen3.8-27b-uncensored\tllamacpp\t127.0.0.1:32101\tllamacpp:requests_processing\t32101'
+  assert_model_policy spark-a qwen3.8-27b-uncensored-nvfp4 $'qwen3.8-27b-uncensored-nvfp4\tsglang-orca-nvfp4\t127.0.0.1:32106\tsglang:num_running_reqs\t32106'
+  assert_model_policy spark-a qwen3.8-flash-next $'qwen3.8-flash-next\tvllm-qwen38-flash-next-2x\t127.0.0.1:32104\tvllm:num_requests_running\t32104'
+  assert_model_policy spark-a deepseek-v4-flash-vision-exp-abliterated $'deepseek-v4-flash-vision-exp-abliterated\tvllm-deepseek-v4-flash-2x\t127.0.0.1:32102\tvllm:num_requests_running\t32102'
+  assert_model_policy spark-a glm-5.3-flash-exl3-abliterated $'glm-5.3-flash-exl3-abliterated\tvllm-glm53-exl3-2x\t127.0.0.1:32105\tvllm:num_requests_running\t32105'
+  printf -v expected 'spark-b/qwen3.8-27b-uncensored\tllamacpp-spark-b\t%s:%s\tllamacpp:requests_processing\t%s' \
+    "$spark_b_host" "$spark_b_gateway_port" "$spark_b_llamacpp_proxy_port"
+  assert_model_policy spark-b qwen3.8-27b-uncensored "$expected"
+  printf -v expected 'spark-b/deepseek-v4-flash-0731\tvllm-spark-b\t%s:%s\tvllm:num_requests_running\t%s' \
+    "$spark_b_host" "$spark_b_gateway_port" "$spark_b_vllm_proxy_port"
+  assert_model_policy spark-b deepseek-v4-flash-0731 "$expected"
+  printf -v expected 'rd-legion/kat-coder-v2.5-dev\tllamacpp-rd-legion\t%s:%s\tllamacpp:requests_processing\t%s' \
+    "$rd_host" "$rd_kat_coder_port" "$rd_kat_coder_port"
+  assert_model_policy rd-legion kat-coder-v2.5-dev "$expected"
+  printf -v expected 'rd-legion/qwen38-27b-128k\tllamacpp-rd-legion\t%s:%s\tllamacpp:requests_processing\t%s' \
+    "$rd_host" "$rd_qwen_128k_port" "$rd_qwen_128k_port"
+  assert_model_policy rd-legion qwen38-27b-128k "$expected"
+  printf -v expected 'rd-legion/qwen38-27b-obliterated\tllamacpp-rd-legion\t%s:%s\tllamacpp:requests_processing\t%s' \
+    "$rd_host" "$rd_qwen_obliterated_port" "$rd_qwen_obliterated_port"
+  assert_model_policy rd-legion qwen38-27b-obliterated "$expected"
+  printf -v expected 'rd-legion/qwen38-27b-orca-uncensored\tllamacpp-rd-legion\t%s:%s\tllamacpp:requests_processing\t%s' \
+    "$rd_host" "$rd_qwen_orca_port" "$rd_qwen_orca_port"
+  assert_model_policy rd-legion qwen38-27b-orca-uncensored "$expected"
+}
+
+active_proxy_port() {
+  local proxy=$1 authority
+  authority=${proxy#*://}
+  authority=${authority%%/*}
+  if [[ $authority =~ ^\[[^]]+\]:([0-9]+)$ ]] || [[ $authority =~ ^[^:]+:([0-9]+)$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+fetch_running() {
+  local node=$1 url=$2 response
+  response=$(curl -fsS --connect-timeout 3 --max-time 10 "$url/running") || {
+    fail "cannot query active workers: node=$node"
+    return 1
+  }
+  jq -e '
+    type == "object" and
+    (.running | type == "array") and
+    all(.running[];
+      (.model | type == "string") and (.model | length > 0) and
+      (.proxy | type == "string") and (.proxy | length > 0))
+  ' <<<"$response" >/dev/null || {
+    fail "invalid active-worker response: node=$node"
+    return 1
+  }
+  printf '%s\n' "$response"
+}
+
+fetch_active_snapshot() {
+  local spark_a spark_b rd
+  spark_a=$(fetch_running spark-a "$spark_a_gateway_url")
+  spark_b=$(fetch_running spark-b "$spark_b_gateway_url")
+  rd=$(fetch_running rd-legion "$rd_gateway_url")
+  jq -cnS --argjson spark_a "$spark_a" --argjson spark_b "$spark_b" --argjson rd "$rd" '
+    [
+      ($spark_a.running[] | {node: "spark-a", model, proxy}),
+      ($spark_b.running[] | {node: "spark-b", model, proxy}),
+      ($rd.running[] | {node: "rd-legion", model, proxy})
+    ] | sort_by(.node, .model, .proxy)
+  '
+}
+
+fetch_targets() {
+  local response
+  response=$(curl -fsS --connect-timeout 3 --max-time 10 "$prometheus_url/api/v1/targets") || {
+    fail 'cannot query Prometheus targets'
+    return 1
+  }
+  jq -e '.status == "success" and (.data.activeTargets | type == "array")' \
+    <<<"$response" >/dev/null || {
+    fail 'invalid Prometheus targets response'
+    return 1
+  }
+  printf '%s\n' "$response"
+}
+
+validate_active_snapshot() {
+  local snapshot=$1 rows node model proxy policy expected_proxy_port actual_proxy_port
+  rows=$(jq -r '.[] | [.node, .model, .proxy] | @tsv' <<<"$snapshot")
+  while IFS=$'\t' read -r node model proxy; do
+    [[ -n $node && -n $model && -n $proxy ]] || continue
+    [[ $model =~ ^[A-Za-z0-9._/-]+$ ]] || {
+      fail "unsafe active model identifier: node=$node model=$model"
+      return 1
+    }
+    [[ $proxy =~ ^https?://[^[:space:]]+$ ]] || {
+      fail "unsafe active proxy: node=$node model=$model"
+      return 1
+    }
+    policy=$(model_policy "$node" "$model") || return 1
+    IFS=$'\t' read -r _ _ _ _ expected_proxy_port <<<"$policy"
+    actual_proxy_port=$(active_proxy_port "$proxy") || {
+      fail "active worker proxy has no explicit port: node=$node model=$model"
+      return 1
+    }
+    [[ $actual_proxy_port == "$expected_proxy_port" ]] || {
+      fail "active worker proxy port does not match scrape policy: node=$node model=$model"
+      return 1
+    }
+  done <<<"$rows"
+}
+
+active_worker_telemetry_healthy() {
+  local snapshot=$1 targets_response=$2 rows node model proxy policy
+  local prom_model job instance metric expected_proxy_port query query_response
+  telemetry_loaded=()
+  telemetry_error=
+  rows=$(jq -r '.[] | [.node, .model, .proxy] | @tsv' <<<"$snapshot")
+  while IFS=$'\t' read -r node model proxy; do
+    [[ -n $node && -n $model && -n $proxy ]] || continue
+    policy=$(model_policy "$node" "$model") || return 1
+    IFS=$'\t' read -r prom_model job instance metric expected_proxy_port <<<"$policy"
+    if ! target_instance_healthy "$targets_response" "$job" "$instance"; then
+      telemetry_error="active worker has no healthy scrape: node=$node model=$prom_model job=$job instance=$instance"
+      return 1
+    fi
+    query="count((time() - timestamp(${metric}{job=\"${job}\",instance=\"${instance}\",model=\"${prom_model}\"})) < 15)"
+    if ! query_response=$(curl -fsS --connect-timeout 3 --max-time 10 "$prometheus_url/api/v1/query" \
+      --get --data-urlencode "query=$query"); then
+      telemetry_error="active worker telemetry query failed: node=$node model=$prom_model"
+      return 1
+    fi
+    if ! jq -e '
+      .status == "success" and
+      ((.data.result[0].value[1] // "0") | tonumber > 0)
+    ' <<<"$query_response" >/dev/null; then
+      telemetry_error="active worker has no correctly labeled telemetry: node=$node model=$prom_model job=$job"
+      return 1
+    fi
+    telemetry_loaded+=("$node/$prom_model:$job@$instance")
+  done <<<"$rows"
+}
+
+qualify_active_workers() {
+  local initial_snapshot current_snapshot healthy converged=false attempt job
+  initial_snapshot=$(fetch_active_snapshot)
+  validate_active_snapshot "$initial_snapshot"
+  for attempt in 1 2 3 4 5 6; do
+    targets_response=$(fetch_targets)
+    for job in llama-swap llama-swap-spark-b llama-swap-rd-legion node; do
+      target_job_healthy "$targets_response" "$job" || {
+        fail "required scrape job is not healthy: $job"
+        return 1
+      }
+    done
+
+    healthy=false
+    if active_worker_telemetry_healthy "$initial_snapshot" "$targets_response"; then
+      healthy=true
+    fi
+    current_snapshot=$(fetch_active_snapshot)
+    if [[ $current_snapshot != "$initial_snapshot" ]]; then
+      fail 'active worker set changed during telemetry qualification'
+      return 1
+    fi
+    if [[ $healthy == true ]]; then
+      converged=true
+      break
+    fi
+    if ((attempt < 6)); then
+      sleep 2
+    fi
+  done
+  [[ $converged == true ]] || fail "telemetry did not converge: $telemetry_error"
+}
+
+validate_live_dashboard() {
+  local dashboard_response=$1
+  jq -e '
+    [.dashboard.panels[] | {title, expression: ([.targets[]?.expr] | join("\n"))}] as $panels |
+    def expression($title): $panels[] | select(.title == $title) | .expression;
+    .meta.provisioned == true and
+    .dashboard.uid == "spark-models" and
+    .dashboard.title == "Model Serving · DGX Spark Cluster" and
+    any(.dashboard.templating.list[];
+      .name == "model" and
+      ((.query.query // .query) == "label_values({service=\"model-worker\",node=~\"$node\"}, model)")) and
+    (expression("Decode throughput (tok/s)") | contains("vllm:generation_tokens_total")) and
+    (expression("Prefill throughput (tok/s)") | contains("vllm:prompt_tokens_by_source_total")) and
+    (expression("Completed request rate") | contains("vllm:e2e_request_latency_seconds_count")) and
+    (expression("Queued requests") | contains("vllm:num_requests_waiting")) and
+    (expression("vLLM KV cache usage") | contains("vllm:kv_cache_usage_perc")) and
+    (expression("MTP acceptance") | contains("vllm:spec_decode_num_accepted_tokens_total")) and
+    (expression("vLLM preemptions") | contains("vllm:num_preemptions_total"))
+  ' <<<"$dashboard_response" >/dev/null
+}
+
+status() {
+  local containers mounts_ok targets_response dashboard_response target_summary loaded_summary telemetry_error
+  local -a telemetry_loaded=()
+
+  require_commands
+  load_site_config
+  render_runtime_files check || {
+    fail 'runtime configuration is absent or stale; run install'
+    return 1
+  }
+  verify_serve_prerequisite
+  require_volumes
+  systemctl --user is-enabled "$unit_name" >/dev/null
+  systemctl --user is-active "$unit_name" >/dev/null
+  for container in "$prometheus_container" "$grafana_container" "$node_container"; do
+    [[ $(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null || true) == true ]] ||
+      fail "container is not running: $container"
+  done
+
+  containers=$(docker inspect "$prometheus_container" "$grafana_container" "$node_container")
+  mounts_ok=$(jq -r \
+    --arg root "$root_dir" --arg compose "$compose_file" \
+    --arg prom "$prometheus_volume" --arg graf "$grafana_volume" '
+      [.[] | .Mounts[]] as $mounts |
+      all(.[];
+        .Config.Labels["com.docker.compose.project"] == "spark-monitoring" and
+        .Config.Labels["com.docker.compose.project.config_files"] == $compose) and
+      any($mounts[]; .Type == "volume" and .Name == $prom and .Destination == "/prometheus") and
+      any($mounts[]; .Type == "volume" and .Name == $graf and .Destination == "/var/lib/grafana") and
+      all($mounts[] | select(.Type == "bind" and .Destination != "/host"); .Source | startswith($root))
+    ' <<<"$containers")
+  [[ $mounts_ok == true ]] || fail 'live mounts or Compose ownership do not match this repository'
+
+  curl -fsS --max-time 10 "$prometheus_url/-/ready" >/dev/null
+  curl -fsS --max-time 10 "$grafana_url/api/health" >/dev/null
+  curl -fsS --max-time 15 "$grafana_public_url/api/health" >/dev/null
+
+  qualify_active_workers
+
+  dashboard_response=$(curl -fsS --max-time 10 "$grafana_url/api/dashboards/uid/spark-models")
+  validate_live_dashboard "$dashboard_response" || fail 'provisioned cluster dashboard does not match monitoring policy'
+
+  target_summary=$(jq -c '
+    .data.activeTargets | group_by(.health) |
+    map({health: .[0].health, count: length})
+  ' <<<"$targets_response")
+  if ((${#telemetry_loaded[@]})); then
+    loaded_summary=$(IFS=,; printf '%s' "${telemetry_loaded[*]}")
+  else
+    loaded_summary=none
+  fi
+  log "status ready project=spark-monitoring targets=$target_summary loaded=$loaded_summary dashboard=spark-models serve=verified"
+  jq -r '.[] |
+    [.Name[1:], .Id[0:12], .State.Status, (.RestartCount | tostring),
+     ([.Mounts[] | select(.Type == "volume") | .Name] | join(","))] | @tsv
+  ' <<<"$containers"
+}
+
+install_stack() {
+  require_commands
+  load_site_config
+  verify_serve_prerequisite
+  verify_linger_prerequisite
+  require_volumes
+  render_runtime_files write
+  compose config --quiet
+  compose pull
+  validate
+  install_unit
+  if systemctl --user is-active --quiet "$unit_name"; then
+    systemctl --user restart "$unit_name"
+  else
+    systemctl --user start "$unit_name"
+  fi
+  status
+}
+
+reload_stack() {
+  require_commands
+  load_site_config
+  verify_serve_prerequisite
+  render_runtime_files write
+  validate
+  compose up -d --no-deps --force-recreate prometheus grafana
+  wait_ready
+  status
+}
+
+case ${1:-} in
+  validate) (($# == 1)) || usage; validate ;;
+  initialize) (($# == 1)) || usage; initialize ;;
+  install) (($# == 1)) || usage; install_stack ;;
+  status) (($# == 1)) || usage; status ;;
+  reload) (($# == 1)) || usage; reload_stack ;;
+  up) (($# == 1)) || usage; up ;;
+  down) (($# == 1)) || usage; down ;;
+  *) usage ;;
+esac

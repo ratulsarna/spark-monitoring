@@ -5,19 +5,20 @@ stack for model-serving telemetry. The serving stack owns model processes,
 gateway routing, and raw engine metrics. Tailscale Serve is the external Grafana
 boundary.
 
+For a new deployment, follow [SETUP.md](SETUP.md). It gives coding agents the
+full procedure for a two-Spark serving fleet.
+
+The runtime expects a llama-swap-compatible `/running` endpoint from every
+serving gateway. The host telemetry panels also query llama-swap's
+`llamaswap_*` Prometheus metrics. This repository does not install or manage
+llama-swap.
+
 Prometheus listens on `127.0.0.1:9090`, Grafana on `127.0.0.1:3100`, and
 node-exporter on `127.0.0.1:9100`. Prometheus history and Grafana state live in
 the external Docker volumes named in `site.yml`; the lifecycle never replaces
 an existing volume.
 
 ## Site configuration
-
-Copy the public example, fill in the local topology, and keep it private:
-
-```bash
-cp site.example.yml site.yml
-chmod 600 site.yml
-```
 
 `site.yml` is ignored, must be a regular file with mode `0600`, and is
 validated strictly: unknown keys, duplicate YAML keys, unsupported
@@ -48,28 +49,13 @@ model. Shell code does not contain model-name cases.
 `.local/spark-monitoring.service` directly from this configuration. The
 generated unit uses the checkout's absolute path, so clones may live anywhere.
 
-Before installation, create the exact HTTPS Serve route configured under
-`grafana` and enable user lingering:
-
-```bash
-tailscale serve --bg --https=8443 http://127.0.0.1:3100
-sudo loginctl enable-linger "$USER"
-```
-
-The lifecycle verifies these prerequisites and does not modify them.
+The lifecycle verifies the configured Tailscale Serve route and user lingering.
+It does not modify either one.
 
 ## Lifecycle
 
-On a new empty host:
-
-```bash
-./bin/monitoring initialize
-./bin/monitoring install
-```
-
-`initialize` refuses existing volumes. `install` validates the site, fetches
-pinned images, installs and enables the user service, and starts the Compose
-project. Ordinary `validate` is read-only and does not fetch images.
+Use [SETUP.md](SETUP.md) for the first installation. Ordinary `validate` is
+read-only and does not fetch images.
 
 Normal operations are:
 

@@ -1,10 +1,10 @@
 apiVersion: 1
 
 providers:
-  - name: Qwen3.8 Spark
+  - name: Model Serving
     orgId: 1
-    folder: DGX Spark
-    folderUid: dgx-spark
+    folder: Model Serving
+    folderUid: model-serving
     type: file
     disableDeletion: true
     allowUiUpdates: false

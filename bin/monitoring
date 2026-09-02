@@ -7,7 +7,7 @@ root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 compose_file=$root_dir/compose.yml
 site_config=$root_dir/site.yml
 prometheus_config=$root_dir/prometheus.yml
-prometheus_template=$root_dir/prometheus.yml.example
+config_tool=$root_dir/lib/monitoring_config.py
 runtime_dir=$root_dir/.local
 unit_template=$root_dir/systemd/spark-monitoring.service
 unit_source=$runtime_dir/spark-monitoring.service
@@ -15,6 +15,7 @@ unit_name=spark-monitoring.service
 user_config_dir=${XDG_CONFIG_HOME:-$HOME/.config}
 unit_target=$user_config_dir/systemd/user/$unit_name
 site_config_loaded=false
+site_json=
 prometheus_container=spark-monitoring-prometheus
 grafana_container=spark-monitoring-grafana
 node_container=spark-monitoring-node-exporter
@@ -39,7 +40,7 @@ require_commands() {
 }
 
 load_site_config() {
-  local site_json mode
+  local mode
   [[ $site_config_loaded == false ]] || return 0
   [[ -f $site_config && ! -L $site_config ]] || {
     fail "site config is missing; copy site.example.yml to site.yml"
@@ -50,66 +51,7 @@ load_site_config() {
     fail "site config must be private; run: chmod 600 $site_config"
     return 1
   }
-  site_json=$(python3 - "$site_config" <<'PY'
-import json
-import re
-import sys
-import yaml
-
-if sys.flags.optimize:
-    raise SystemExit("Python assertions must be enabled")
-
-with open(sys.argv[1], encoding="utf-8") as stream:
-    site = yaml.safe_load(stream)
-
-def host(value):
-    assert isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9.-]+", value)
-    return value
-
-def port(value):
-    assert isinstance(value, int) and 1 <= value <= 65535
-    return value
-
-def volume(value):
-    assert isinstance(value, str) and len(value) <= 255
-    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value)
-    return value
-
-workers = site["rd_legion"]["worker_ports"]
-required_workers = {
-    "kat-coder-v2.5-dev",
-    "qwen38-27b-128k",
-    "qwen38-27b-obliterated",
-    "qwen38-27b-orca-uncensored",
-}
-assert set(workers) == required_workers
-prometheus_volume = volume(site["storage"]["prometheus_volume"])
-grafana_volume = volume(site["storage"]["grafana_volume"])
-assert prometheus_volume != grafana_volume
-validated = {
-    "storage": {
-        "prometheus_volume": prometheus_volume,
-        "grafana_volume": grafana_volume,
-    },
-    "grafana": {
-        "serve_host": host(site["grafana"]["serve_host"]),
-        "serve_port": port(site["grafana"]["serve_port"]),
-    },
-    "spark_b": {
-        "host": host(site["spark_b"]["host"]),
-        "gateway_port": port(site["spark_b"]["gateway_port"]),
-        "llamacpp_proxy_port": port(site["spark_b"]["llamacpp_proxy_port"]),
-        "vllm_proxy_port": port(site["spark_b"]["vllm_proxy_port"]),
-    },
-    "rd_legion": {
-        "host": host(site["rd_legion"]["host"]),
-        "gateway_port": port(site["rd_legion"]["gateway_port"]),
-        "worker_ports": {key: port(workers[key]) for key in sorted(required_workers)},
-    },
-}
-print(json.dumps(validated, separators=(",", ":")))
-PY
-  ) || {
+  site_json=$(python3 "$config_tool" validate "$site_config") || {
     fail "site config is invalid: $site_config"
     return 1
   }
@@ -118,89 +60,14 @@ PY
   grafana_volume=$(jq -er '.storage.grafana_volume' <<<"$site_json")
   grafana_serve_host=$(jq -er '.grafana.serve_host' <<<"$site_json")
   grafana_serve_port=$(jq -er '.grafana.serve_port' <<<"$site_json")
-  spark_b_host=$(jq -er '.spark_b.host' <<<"$site_json")
-  spark_b_gateway_port=$(jq -er '.spark_b.gateway_port' <<<"$site_json")
-  spark_b_llamacpp_proxy_port=$(jq -er '.spark_b.llamacpp_proxy_port' <<<"$site_json")
-  spark_b_vllm_proxy_port=$(jq -er '.spark_b.vllm_proxy_port' <<<"$site_json")
-  rd_host=$(jq -er '.rd_legion.host' <<<"$site_json")
-  rd_gateway_port=$(jq -er '.rd_legion.gateway_port' <<<"$site_json")
-  rd_kat_coder_port=$(jq -er '.rd_legion.worker_ports["kat-coder-v2.5-dev"]' <<<"$site_json")
-  rd_qwen_128k_port=$(jq -er '.rd_legion.worker_ports["qwen38-27b-128k"]' <<<"$site_json")
-  rd_qwen_obliterated_port=$(jq -er '.rd_legion.worker_ports["qwen38-27b-obliterated"]' <<<"$site_json")
-  rd_qwen_orca_port=$(jq -er '.rd_legion.worker_ports["qwen38-27b-orca-uncensored"]' <<<"$site_json")
-  spark_b_gateway_url="https://${spark_b_host}:${spark_b_gateway_port}"
-  rd_gateway_url="http://${rd_host}:${rd_gateway_port}"
   grafana_public_url="https://${grafana_serve_host}:${grafana_serve_port}"
   site_config_loaded=true
 }
 
 render_runtime_files() {
   local action=$1
-  python3 - "$action" "$root_dir" "$site_config" "$prometheus_template" "$prometheus_config" \
-    "$unit_template" "$unit_source" <<'PY'
-import os
-import pathlib
-import sys
-import tempfile
-import yaml
-
-action, root_value, site_value, prom_template_value, prom_output_value, unit_template_value, unit_output_value = sys.argv[1:]
-root = pathlib.Path(root_value)
-with open(site_value, encoding="utf-8") as stream:
-    site = yaml.safe_load(stream)
-
-replacements = {
-    "SPARK_B_HOST": site["spark_b"]["host"],
-    "SPARK_B_GATEWAY_PORT": site["spark_b"]["gateway_port"],
-    "RD_LEGION_HOST": site["rd_legion"]["host"],
-    "RD_GATEWAY_PORT": site["rd_legion"]["gateway_port"],
-    "RD_KAT_CODER_PORT": site["rd_legion"]["worker_ports"]["kat-coder-v2.5-dev"],
-    "RD_QWEN_128K_PORT": site["rd_legion"]["worker_ports"]["qwen38-27b-128k"],
-    "RD_QWEN_OBLITERATED_PORT": site["rd_legion"]["worker_ports"]["qwen38-27b-obliterated"],
-    "RD_QWEN_ORCA_PORT": site["rd_legion"]["worker_ports"]["qwen38-27b-orca-uncensored"],
-}
-
-def render(path, values):
-    text = pathlib.Path(path).read_text(encoding="utf-8")
-    for key, value in values.items():
-        token = "{{" + key + "}}"
-        if token not in text:
-            raise SystemExit(f"missing template token: {key}")
-        text = text.replace(token, str(value))
-    if "{{" in text or "}}" in text:
-        raise SystemExit("unresolved template token")
-    return text
-
-prometheus = render(prom_template_value, replacements)
-working_root = "".join(
-    "%%" if character == "%" else character
-    if character.isascii() and (character.isalnum() or character in "/._-")
-    else "".join(f"\\x{byte:02x}" for byte in character.encode("utf-8"))
-    for character in str(root)
-)
-escaped_root = str(root).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
-unit = render(unit_template_value, {"CHECKOUT_DIRECTORY": working_root, "CHECKOUT_ROOT": escaped_root})
-outputs = ((pathlib.Path(prom_output_value), prometheus, 0o644), (pathlib.Path(unit_output_value), unit, 0o600))
-
-if action == "check":
-    if any(not path.is_file() or path.is_symlink() or path.read_text(encoding="utf-8") != content
-           for path, content, _ in outputs):
-        raise SystemExit("rendered runtime files are absent or stale")
-elif action == "write":
-    pathlib.Path(unit_output_value).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(pathlib.Path(unit_output_value).parent, 0o700)
-    for path, content, mode in outputs:
-        if path.is_file() and not path.is_symlink() and path.read_text(encoding="utf-8") == content:
-            os.chmod(path, mode)
-            continue
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as stream:
-            stream.write(content)
-            temporary = pathlib.Path(stream.name)
-        os.chmod(temporary, mode)
-        os.replace(temporary, path)
-else:
-    raise SystemExit("invalid render action")
-PY
+  python3 "$config_tool" runtime "$action" "$root_dir" "$site_config" "$prometheus_config" \
+    "$unit_template" "$unit_source"
 }
 
 serve_mapping_valid() {
@@ -261,152 +128,15 @@ require_volumes() {
 }
 
 validate_provisioning() {
-  python3 - "$root_dir" "$site_config" <<'PY'
+  python3 - "$root_dir" <<'PY'
 import json
 import pathlib
 import sys
-
 import yaml
 
 if sys.flags.optimize:
     raise SystemExit("Python assertions must be enabled")
-
 root = pathlib.Path(sys.argv[1])
-with open(sys.argv[2], encoding="utf-8") as stream:
-    site = yaml.safe_load(stream)
-spark_b_target = f'{site["spark_b"]["host"]}:{site["spark_b"]["gateway_port"]}'
-rd_target = f'{site["rd_legion"]["host"]}:{site["rd_legion"]["gateway_port"]}'
-rd_worker_targets = {
-    model: f'{site["rd_legion"]["host"]}:{port}'
-    for model, port in site["rd_legion"]["worker_ports"].items()
-}
-prometheus = yaml.safe_load((root / "prometheus.yml").read_text(encoding="utf-8"))
-jobs = {job["job_name"]: job for job in prometheus["scrape_configs"]}
-expected_jobs = {
-    "deepseek-live-throughput-spark-b",
-    "llama-swap",
-    "llama-swap-rd-legion",
-    "llama-swap-spark-b",
-    "llamacpp",
-    "llamacpp-rd-legion",
-    "llamacpp-spark-b",
-    "node",
-    "sglang",
-    "sglang-orca-nvfp4",
-    "vllm-deepseek-v4-flash-2x",
-    "vllm-glm53-exl3-2x",
-    "vllm-qwen38-flash-next-2x",
-    "vllm-spark-b",
-}
-assert set(jobs) == expected_jobs
-assert prometheus["global"]["external_labels"] == {"cluster": "dgx-spark"}
-
-
-def assert_single(name, target, labels, *, scheme=None, path="/metrics"):
-    job = jobs[name]
-    assert job.get("scheme", "http") == (scheme or "http")
-    assert job.get("metrics_path", "/metrics") == path
-    assert job["static_configs"] == [{"targets": [target], "labels": labels}]
-
-
-assert_single("llama-swap", "127.0.0.1:30000", {"service": "model-gateway", "node": "spark-a"})
-assert_single(
-    "llama-swap-spark-b",
-    spark_b_target,
-    {"service": "model-gateway", "node": "spark-b"},
-    scheme="https",
-)
-assert_single(
-    "llama-swap-rd-legion",
-    rd_target,
-    {"service": "model-gateway", "node": "rd-legion"},
-)
-assert_single("node", "127.0.0.1:9100", {"service": "host", "node": "spark-a"})
-assert_single(
-    "sglang",
-    "127.0.0.1:32100",
-    {"service": "model-worker", "model": "qwen3.8-27b", "engine": "sglang", "node": "spark-a"},
-)
-assert_single(
-    "sglang-orca-nvfp4",
-    "127.0.0.1:32106",
-    {
-        "service": "model-worker",
-        "model": "qwen3.8-27b-uncensored-nvfp4",
-        "engine": "sglang",
-        "node": "spark-a",
-    },
-)
-assert_single(
-    "vllm-qwen38-flash-next-2x",
-    "127.0.0.1:32104",
-    {"service": "model-worker", "model": "qwen3.8-flash-next", "engine": "vllm", "node": "spark-a"},
-)
-assert_single(
-    "llamacpp",
-    "127.0.0.1:32101",
-    {"service": "model-worker", "model": "qwen3.8-27b-uncensored", "engine": "llamacpp", "node": "spark-a"},
-)
-
-deepseek = jobs["vllm-deepseek-v4-flash-2x"]
-assert deepseek["static_configs"] == [{
-    "targets": ["127.0.0.1:32102"],
-    "labels": {"service": "model-worker", "engine": "vllm", "node": "spark-a"},
-}]
-assert deepseek["metric_relabel_configs"] == [{
-    "source_labels": ["model_name"],
-    "regex": "(deepseek-v4-flash-(0731|vision-exp)(-abliterated)?)",
-    "target_label": "model",
-    "replacement": "$1",
-}]
-
-glm = jobs["vllm-glm53-exl3-2x"]
-assert glm["static_configs"] == [{
-    "targets": ["127.0.0.1:32105"],
-    "labels": {"service": "model-worker", "model": "glm-5.3-flash-exl3", "engine": "vllm", "node": "spark-a"},
-}]
-assert glm["metric_relabel_configs"] == [{
-    "source_labels": ["model_name"],
-    "regex": r"(glm-5\.3-flash-exl3(-abliterated)?)",
-    "target_label": "model",
-    "replacement": "$1",
-}]
-
-assert_single(
-    "llamacpp-spark-b",
-    spark_b_target,
-    {"service": "model-worker", "model": "spark-b/qwen3.8-27b-uncensored", "engine": "llamacpp", "node": "spark-b"},
-    scheme="https",
-    path="/worker-orca/metrics",
-)
-assert_single(
-    "vllm-spark-b",
-    spark_b_target,
-    {"service": "model-worker", "model": "spark-b/deepseek-v4-flash-0731", "engine": "vllm", "node": "spark-b"},
-    scheme="https",
-    path="/worker-vllm/metrics",
-)
-assert_single(
-    "deepseek-live-throughput-spark-b",
-    spark_b_target,
-    {"service": "model-throughput", "model": "spark-b/deepseek-v4-flash-0731", "engine": "vllm", "node": "spark-b"},
-    scheme="https",
-    path="/deepseek-throughput/metrics",
-)
-assert jobs["llamacpp-rd-legion"].get("metrics_path", "/metrics") == "/metrics"
-assert jobs["llamacpp-rd-legion"]["static_configs"] == [
-    {
-        "targets": [rd_worker_targets[model_id]],
-        "labels": {"service": "model-worker", "model": model, "engine": "llamacpp", "node": "rd-legion"},
-    }
-    for model_id, model in (
-        ("kat-coder-v2.5-dev", "rd-legion/kat-coder-v2.5-dev"),
-        ("qwen38-27b-128k", "rd-legion/qwen38-27b-128k"),
-        ("qwen38-27b-obliterated", "rd-legion/qwen38-27b-obliterated"),
-        ("qwen38-27b-orca-uncensored", "rd-legion/qwen38-27b-orca-uncensored"),
-    )
-]
-
 datasource = yaml.safe_load(
     (root / "grafana/provisioning/datasources/prometheus.yml").read_text(encoding="utf-8")
 )
@@ -420,19 +150,14 @@ provider = yaml.safe_load(
 )["providers"][0]
 assert provider["options"]["path"] == "/var/lib/grafana/dashboards"
 
-expected = {
-    "qwen38-spark.json": ("qwen38-spark", "Qwen3.8-27B · DGX Spark"),
-    "spark-models.json": ("spark-models", "Model Serving · DGX Spark Cluster"),
-}
-dashboards = {}
-for filename, (uid, title) in expected.items():
-    dashboard = json.loads((root / "grafana/dashboards" / filename).read_text(encoding="utf-8"))
-    assert dashboard["uid"] == uid
-    assert dashboard["title"] == title
-    assert len(dashboard["panels"]) >= 14
-    dashboards[uid] = dashboard
+dashboard_files = list((root / "grafana/dashboards").glob("*.json"))
+assert [path.name for path in dashboard_files] == ["spark-models.json"]
+cluster = json.loads(dashboard_files[0].read_text(encoding="utf-8"))
+assert cluster["uid"] == "spark-models"
+assert cluster["title"] == "Model Serving"
+assert cluster["refresh"] == "2s"
+assert len(cluster["panels"]) >= 14
 
-cluster = dashboards["spark-models"]
 variables = {variable["name"]: variable for variable in cluster["templating"]["list"]}
 model_query = variables["model"]["query"]
 if isinstance(model_query, dict):
@@ -452,11 +177,9 @@ required_panels = {
     "vLLM preemptions": ("vllm:num_preemptions_total",),
 }
 for title, metrics in required_panels.items():
-    expression = panel_expressions[title]
-    assert all(metric in expression for metric in metrics)
+    assert all(metric in panel_expressions[title] for metric in metrics)
 PY
 }
-
 validate() {
   local prometheus_image
   require_commands
@@ -477,7 +200,6 @@ validate() {
     -v "$prometheus_config:/etc/prometheus/prometheus.yml:ro" \
     "$prometheus_image" check config /etc/prometheus/prometheus.yml >/dev/null
   validate_provisioning
-  validate_model_policies
   systemd-analyze verify "$unit_source" >/dev/null
   log 'validation passed'
 }
@@ -568,112 +290,34 @@ target_job_healthy() {
 }
 
 target_instance_healthy() {
-  local targets_response=$1 job=$2 instance=$3
-  jq -e --arg job "$job" --arg instance "$instance" '
+  local targets_response=$1 job=$2 instance=$3 scrape_url=$4 node=$5 engine=$6
+  jq -e --arg job "$job" --arg instance "$instance" --arg scrape_url "$scrape_url" \
+    --arg node "$node" --arg engine "$engine" '
     [.data.activeTargets[] |
-      select(.labels.job == $job and .labels.instance == $instance)] as $targets |
+      select(.labels.job == $job and .labels.instance == $instance and
+        .labels.service == "model-worker" and .labels.node == $node and
+        .labels.engine == $engine and .scrapeUrl == $scrape_url)] as $targets |
     (($targets | length) == 1) and all($targets[]; .health == "up")
   ' <<<"$targets_response" >/dev/null
 }
 
-model_policy() {
-  local node=$1 model=$2 local_model
-  case $node in
-    spark-a)
-      case $model in
-        qwen3.8-27b)
-          printf '%s\t%s\t%s\t%s\t%s\n' "$model" sglang 127.0.0.1:32100 sglang:num_running_reqs 32100
-          ;;
-        qwen3.8-27b-uncensored)
-          printf '%s\t%s\t%s\t%s\t%s\n' "$model" llamacpp 127.0.0.1:32101 llamacpp:requests_processing 32101
-          ;;
-        qwen3.8-27b-uncensored-nvfp4)
-          printf '%s\t%s\t%s\t%s\t%s\n' "$model" sglang-orca-nvfp4 127.0.0.1:32106 sglang:num_running_reqs 32106
-          ;;
-        qwen3.8-flash-next)
-          printf '%s\t%s\t%s\t%s\t%s\n' "$model" vllm-qwen38-flash-next-2x 127.0.0.1:32104 vllm:num_requests_running 32104
-          ;;
-        deepseek-v4-flash-0731|deepseek-v4-flash-0731-abliterated|deepseek-v4-flash-vision-exp|deepseek-v4-flash-vision-exp-abliterated)
-          printf '%s\t%s\t%s\t%s\t%s\n' "$model" vllm-deepseek-v4-flash-2x 127.0.0.1:32102 vllm:num_requests_running 32102
-          ;;
-        glm-5.3-flash-exl3|glm-5.3-flash-exl3-abliterated)
-          printf '%s\t%s\t%s\t%s\t%s\n' "$model" vllm-glm53-exl3-2x 127.0.0.1:32105 vllm:num_requests_running 32105
-          ;;
-        *) fail "no scrape policy for active worker: node=$node model=$model"; return 1 ;;
-      esac
-      ;;
-    spark-b)
-      local_model=${model#spark-b/}
-      case $local_model in
-        qwen3.8-27b-uncensored)
-          printf 'spark-b/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" llamacpp-spark-b \
-            "$spark_b_host" "$spark_b_gateway_port" llamacpp:requests_processing "$spark_b_llamacpp_proxy_port"
-          ;;
-        deepseek-v4-flash-0731)
-          printf 'spark-b/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" vllm-spark-b \
-            "$spark_b_host" "$spark_b_gateway_port" vllm:num_requests_running "$spark_b_vllm_proxy_port"
-          ;;
-        *) fail "no scrape policy for active worker: node=$node model=$model"; return 1 ;;
-      esac
-      ;;
-    rd-legion)
-      local_model=${model#rd-legion/}
-      case $local_model in
-        kat-coder-v2.5-dev)
-          printf 'rd-legion/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" llamacpp-rd-legion \
-            "$rd_host" "$rd_kat_coder_port" llamacpp:requests_processing "$rd_kat_coder_port"
-          ;;
-        qwen38-27b-128k)
-          printf 'rd-legion/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" llamacpp-rd-legion \
-            "$rd_host" "$rd_qwen_128k_port" llamacpp:requests_processing "$rd_qwen_128k_port"
-          ;;
-        qwen38-27b-obliterated)
-          printf 'rd-legion/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" llamacpp-rd-legion \
-            "$rd_host" "$rd_qwen_obliterated_port" llamacpp:requests_processing "$rd_qwen_obliterated_port"
-          ;;
-        qwen38-27b-orca-uncensored)
-          printf 'rd-legion/%s\t%s\t%s:%s\t%s\t%s\n' "$local_model" llamacpp-rd-legion \
-            "$rd_host" "$rd_qwen_orca_port" llamacpp:requests_processing "$rd_qwen_orca_port"
-          ;;
-        *) fail "no scrape policy for active worker: node=$node model=$model"; return 1 ;;
-      esac
-      ;;
-    *) fail "unknown serving node: $node"; return 1 ;;
-  esac
-}
-
-assert_model_policy() {
-  local node=$1 model=$2 expected=$3 actual
-  actual=$(model_policy "$node" "$model")
-  [[ $actual == "$expected" ]] || fail "invalid model policy: node=$node model=$model"
-}
-
-validate_model_policies() {
-  local expected
-  assert_model_policy spark-a qwen3.8-27b $'qwen3.8-27b\tsglang\t127.0.0.1:32100\tsglang:num_running_reqs\t32100'
-  assert_model_policy spark-a qwen3.8-27b-uncensored $'qwen3.8-27b-uncensored\tllamacpp\t127.0.0.1:32101\tllamacpp:requests_processing\t32101'
-  assert_model_policy spark-a qwen3.8-27b-uncensored-nvfp4 $'qwen3.8-27b-uncensored-nvfp4\tsglang-orca-nvfp4\t127.0.0.1:32106\tsglang:num_running_reqs\t32106'
-  assert_model_policy spark-a qwen3.8-flash-next $'qwen3.8-flash-next\tvllm-qwen38-flash-next-2x\t127.0.0.1:32104\tvllm:num_requests_running\t32104'
-  assert_model_policy spark-a deepseek-v4-flash-vision-exp-abliterated $'deepseek-v4-flash-vision-exp-abliterated\tvllm-deepseek-v4-flash-2x\t127.0.0.1:32102\tvllm:num_requests_running\t32102'
-  assert_model_policy spark-a glm-5.3-flash-exl3-abliterated $'glm-5.3-flash-exl3-abliterated\tvllm-glm53-exl3-2x\t127.0.0.1:32105\tvllm:num_requests_running\t32105'
-  printf -v expected 'spark-b/qwen3.8-27b-uncensored\tllamacpp-spark-b\t%s:%s\tllamacpp:requests_processing\t%s' \
-    "$spark_b_host" "$spark_b_gateway_port" "$spark_b_llamacpp_proxy_port"
-  assert_model_policy spark-b qwen3.8-27b-uncensored "$expected"
-  printf -v expected 'spark-b/deepseek-v4-flash-0731\tvllm-spark-b\t%s:%s\tvllm:num_requests_running\t%s' \
-    "$spark_b_host" "$spark_b_gateway_port" "$spark_b_vllm_proxy_port"
-  assert_model_policy spark-b deepseek-v4-flash-0731 "$expected"
-  printf -v expected 'rd-legion/kat-coder-v2.5-dev\tllamacpp-rd-legion\t%s:%s\tllamacpp:requests_processing\t%s' \
-    "$rd_host" "$rd_kat_coder_port" "$rd_kat_coder_port"
-  assert_model_policy rd-legion kat-coder-v2.5-dev "$expected"
-  printf -v expected 'rd-legion/qwen38-27b-128k\tllamacpp-rd-legion\t%s:%s\tllamacpp:requests_processing\t%s' \
-    "$rd_host" "$rd_qwen_128k_port" "$rd_qwen_128k_port"
-  assert_model_policy rd-legion qwen38-27b-128k "$expected"
-  printf -v expected 'rd-legion/qwen38-27b-obliterated\tllamacpp-rd-legion\t%s:%s\tllamacpp:requests_processing\t%s' \
-    "$rd_host" "$rd_qwen_obliterated_port" "$rd_qwen_obliterated_port"
-  assert_model_policy rd-legion qwen38-27b-obliterated "$expected"
-  printf -v expected 'rd-legion/qwen38-27b-orca-uncensored\tllamacpp-rd-legion\t%s:%s\tllamacpp:requests_processing\t%s' \
-    "$rd_host" "$rd_qwen_orca_port" "$rd_qwen_orca_port"
-  assert_model_policy rd-legion qwen38-27b-orca-uncensored "$expected"
+telemetry_mapping() {
+  local node=$1 model=$2 count
+  count=$(jq -r --arg node "$node" --arg model "$model" '
+    [.model_telemetry[] |
+      select(.node == $node) as $entry |
+      $entry.identities[] |
+      select(.running == $model) |
+      [.model, $entry.scrape.job, $entry.scrape.target, $entry.activity_metric,
+       ($entry.proxy_port | tostring), $entry.scrape.scheme, $entry.scrape.metrics_path,
+       $entry.engine] | @tsv] |
+    if length == 1 then .[0] else empty end
+  ' <<<"$site_json")
+  [[ -n $count ]] || {
+    fail "no unique scrape policy for active worker: node=$node model=$model"
+    return 1
+  }
+  printf '%s\n' "$count"
 }
 
 active_proxy_port() {
@@ -707,17 +351,13 @@ fetch_running() {
 }
 
 fetch_active_snapshot() {
-  local spark_a spark_b rd
-  spark_a=$(fetch_running spark-a "$spark_a_gateway_url")
-  spark_b=$(fetch_running spark-b "$spark_b_gateway_url")
-  rd=$(fetch_running rd-legion "$rd_gateway_url")
-  jq -cnS --argjson spark_a "$spark_a" --argjson spark_b "$spark_b" --argjson rd "$rd" '
-    [
-      ($spark_a.running[] | {node: "spark-a", model, proxy}),
-      ($spark_b.running[] | {node: "spark-b", model, proxy}),
-      ($rd.running[] | {node: "rd-legion", model, proxy})
-    ] | sort_by(.node, .model, .proxy)
-  '
+  local node url response snapshot='[]'
+  while IFS=$'\t' read -r node url; do
+    response=$(fetch_running "$node" "$url")
+    snapshot=$(jq -cn --argjson snapshot "$snapshot" --argjson response "$response" \
+      --arg node "$node" '$snapshot + [$response.running[] | {node: $node, model, proxy}]')
+  done < <(jq -r '.serving_nodes[] | [.name, .running_url] | @tsv' <<<"$site_json")
+  jq -cS 'sort_by(.node, .model, .proxy)' <<<"$snapshot"
 }
 
 fetch_targets() {
@@ -736,6 +376,14 @@ fetch_targets() {
 
 validate_active_snapshot() {
   local snapshot=$1 rows node model proxy policy expected_proxy_port actual_proxy_port
+  jq -e '
+    type == "array" and
+    (length == ([.[] | [.node, .model, .proxy] | join("\u0000")] | unique | length)) and
+    (length == ([.[] | [.node, .model] | join("\u0000")] | unique | length))
+  ' <<<"$snapshot" >/dev/null || {
+    fail 'active-worker snapshot contains duplicate or ambiguous entries'
+    return 1
+  }
   rows=$(jq -r '.[] | [.node, .model, .proxy] | @tsv' <<<"$snapshot")
   while IFS=$'\t' read -r node model proxy; do
     [[ -n $node && -n $model && -n $proxy ]] || continue
@@ -747,8 +395,8 @@ validate_active_snapshot() {
       fail "unsafe active proxy: node=$node model=$model"
       return 1
     }
-    policy=$(model_policy "$node" "$model") || return 1
-    IFS=$'\t' read -r _ _ _ _ expected_proxy_port <<<"$policy"
+    policy=$(telemetry_mapping "$node" "$model") || return 1
+    IFS=$'\t' read -r _ _ _ _ expected_proxy_port _ _ _ <<<"$policy"
     actual_proxy_port=$(active_proxy_port "$proxy") || {
       fail "active worker proxy has no explicit port: node=$node model=$model"
       return 1
@@ -762,15 +410,16 @@ validate_active_snapshot() {
 
 active_worker_telemetry_healthy() {
   local snapshot=$1 targets_response=$2 rows node model proxy policy
-  local prom_model job instance metric expected_proxy_port query query_response
+  local prom_model job instance metric expected_proxy_port scheme path engine scrape_url query query_response
   telemetry_loaded=()
   telemetry_error=
   rows=$(jq -r '.[] | [.node, .model, .proxy] | @tsv' <<<"$snapshot")
   while IFS=$'\t' read -r node model proxy; do
     [[ -n $node && -n $model && -n $proxy ]] || continue
-    policy=$(model_policy "$node" "$model") || return 1
-    IFS=$'\t' read -r prom_model job instance metric expected_proxy_port <<<"$policy"
-    if ! target_instance_healthy "$targets_response" "$job" "$instance"; then
+    policy=$(telemetry_mapping "$node" "$model") || return 1
+    IFS=$'\t' read -r prom_model job instance metric expected_proxy_port scheme path engine <<<"$policy"
+    scrape_url="${scheme}://${instance}${path}"
+    if ! target_instance_healthy "$targets_response" "$job" "$instance" "$scrape_url" "$node" "$engine"; then
       telemetry_error="active worker has no healthy scrape: node=$node model=$prom_model job=$job instance=$instance"
       return 1
     fi
@@ -797,12 +446,12 @@ qualify_active_workers() {
   validate_active_snapshot "$initial_snapshot"
   for attempt in 1 2 3 4 5 6; do
     targets_response=$(fetch_targets)
-    for job in llama-swap llama-swap-spark-b llama-swap-rd-legion node; do
+    while IFS= read -r job; do
       target_job_healthy "$targets_response" "$job" || {
         fail "required scrape job is not healthy: $job"
         return 1
       }
-    done
+    done < <(jq -r '.serving_nodes[].gateway_scrape.job, "node"' <<<"$site_json")
 
     healthy=false
     if active_worker_telemetry_healthy "$initial_snapshot" "$targets_response"; then
@@ -831,7 +480,7 @@ validate_live_dashboard() {
     def expression($title): $panels[] | select(.title == $title) | .expression;
     .meta.provisioned == true and
     .dashboard.uid == "spark-models" and
-    .dashboard.title == "Model Serving · DGX Spark Cluster" and
+    .dashboard.title == "Model Serving" and
     any(.dashboard.templating.list[];
       .name == "model" and
       ((.query.query // .query) == "label_values({service=\"model-worker\",node=~\"$node\"}, model)")) and
@@ -865,6 +514,8 @@ status() {
   done
 
   containers=$(docker inspect "$prometheus_container" "$grafana_container" "$node_container")
+  jq -e 'all(.[]; .State.Running == true and .State.OOMKilled == false and .RestartCount == 0)' \
+    <<<"$containers" >/dev/null || fail 'monitoring container has an OOM or automatic restart history'
   mounts_ok=$(jq -r \
     --arg root "$root_dir" --arg compose "$compose_file" \
     --arg prom "$prometheus_volume" --arg graf "$grafana_volume" '
@@ -932,6 +583,10 @@ reload_stack() {
   wait_ready
   status
 }
+
+if [[ ${MONITORING_SOURCE_ONLY:-false} == true ]]; then
+  return 0
+fi
 
 case ${1:-} in
   validate) (($# == 1)) || usage; validate ;;

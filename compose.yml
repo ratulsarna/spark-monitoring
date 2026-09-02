@@ -85,7 +85,7 @@ services:
       - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-    mem_limit: 512m
+    mem_limit: 768m
     cpus: 1.0
     security_opt:
       - no-new-privileges:true

@@ -6,3 +6,4 @@
 /site.yml
 /prometheus.yml
 /.local/
+__pycache__/

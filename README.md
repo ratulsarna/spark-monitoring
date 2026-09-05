@@ -1,5 +1,9 @@
 # Spark monitoring
 
+<img width="1441" height="960" alt="Pasted 2026-09-02 at 5 59 11 PM" src="https://github.com/user-attachments/assets/f8724017-76d6-4ac5-8545-5ba06b57c8ce" />
+
+---
+
 This repository owns a loopback-bound Prometheus, Grafana, and node-exporter
 stack for model-serving telemetry. The serving stack owns model processes,
 gateway routing, and raw engine metrics. Tailscale Serve is the external Grafana

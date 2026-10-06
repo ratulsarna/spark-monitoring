@@ -50,6 +50,7 @@ The worker endpoint must export Prometheus metrics for one supported engine:
 | SGLang | `sglang:num_running_reqs` |
 | llama.cpp | `llamacpp:requests_processing` |
 | TensorFold | `tensorfold:requests_running` |
+| TensorFold CUDA health exporter (`tensorfold-health`) | `tensorfold_requests_inflight` |
 
 The gateway itself must also expose Prometheus metrics at the configured
 `gateway_scrape` target.
@@ -63,6 +64,16 @@ counter is the cached subset of prompt tokens, so this is an uncached prompt
 token rate for completed requests; it is not a measurement of TensorFold
 prefill compute throughput. The MTP panel uses the rate of accepted draft
 tokens divided by the rate of drafted tokens, also grouped by node and model.
+
+The DeepSeek-V4.1 TensorFold image exports a different family, `tensorfold_*`,
+from TensorFold's CUDA health exporter. The shared throughput, running-request
+and completed-request panels include it. Three DeepSeek-V4.1 panels show
+request, error and rejection rates with stalled and engine-fatal gauges; slots
+in use (`tensorfold_requests_inflight`, plus the lifecycle wrapper's
+`spark_serve_streams` from `/health`); and requests in service, the rate of
+`tensorfold_decode_seconds_total`, which this image increments by each
+finished request's whole duration. The image has no KV pool gauge, and its
+`tensorfold_prefill_seconds_total` stays 0.
 
 ## Work safely
 
@@ -135,7 +146,7 @@ real private endpoints:
 curl -fsS https://spark-a.example.invalid/running | jq .
 curl -fsS https://spark-a.example.invalid/metrics | head
 curl -fsS https://spark-a.example.invalid/workers/model-a/metrics \
-  | grep -E '^(vllm:num_requests_running|sglang:num_running_reqs|llamacpp:requests_processing|tensorfold:requests_running)'
+  | grep -E '^(vllm:num_requests_running|sglang:num_running_reqs|llamacpp:requests_processing|tensorfold:requests_running|tensorfold_requests_inflight)'
 ```
 
 Repeat the checks for the second gateway if it has one. A worker target may use
@@ -226,7 +237,7 @@ Set each field from observed data:
 | `identities[].running` | Exact value from `/running[].model` |
 | `identities[].model` | Model label shown in Grafana |
 | `identities[].metric` | Raw worker metric label value when it differs from `running` |
-| `engine` | `vllm`, `sglang`, `llamacpp`, or `tensorfold` |
+| `engine` | `vllm`, `sglang`, `llamacpp`, `tensorfold`, or `tensorfold-health` |
 | `proxy_port` | Explicit port from `/running[].proxy` |
 | `activity_metric` | Required metric from the engine table above |
 | `scrape` | Worker metrics endpoint reachable from the monitoring host |

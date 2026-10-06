@@ -46,6 +46,18 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported for tensorfold"):
             self.load(fixture)
 
+    def test_tensorfold_health_engine_requires_its_own_activity_metric(self):
+        self.assertEqual(monitoring_config.ENGINES["tensorfold-health"], "tensorfold_requests_inflight")
+        fixture = copy.deepcopy(self.example)
+        row = next(row for row in fixture["model_telemetry"] if row["engine"] == "tensorfold")
+        row["engine"] = "tensorfold-health"
+        with self.assertRaisesRegex(ValueError, "unsupported for tensorfold-health"):
+            self.load(fixture)
+        row["activity_metric"] = "tensorfold_requests_inflight"
+        site = self.load(fixture)
+        loaded = next(row for row in site["model_telemetry"] if row["engine"] == "tensorfold-health")
+        self.assertEqual(loaded["activity_metric"], "tensorfold_requests_inflight")
+
     def test_tensorfold_row_renders_worker_labels_and_target(self):
         site = self.load(self.example)
         row = next(row for row in site["model_telemetry"] if row["engine"] == "tensorfold")

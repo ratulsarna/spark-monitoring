@@ -183,7 +183,17 @@ required_panels = {
     "TensorFold streams by state": ("tensorfold_health:streams",),
     "TensorFold rank/API health (fresh samples)": ("spark_serve_rank_up", "spark_serve_api_up", "spark_serve_probe_timestamp_seconds", "node_textfile_mtime_seconds"),
     "Host memory headroom (MemAvailable / gateway free)": ("spark_serve_host_mem_available_bytes", "spark_serve_probe_timestamp_seconds", "node_textfile_mtime_seconds", "llamaswap_memory_free_bytes"),
+    "TensorFold requests, errors and rejections (DeepSeek-V4.1)": ("tensorfold_requests_total", "tensorfold_request_errors_total", "tensorfold_requests_rejected_total", "tensorfold_requests_stalled", "tensorfold_engine_fatal"),
+    "TensorFold slots in use (DeepSeek-V4.1)": ("tensorfold_requests_inflight", "spark_serve_streams", "spark_serve_probe_timestamp_seconds"),
+    "TensorFold requests in service (DeepSeek-V4.1)": ("tensorfold_decode_seconds_total",),
 }
+# The DeepSeek-V4.1 TensorFold image's tensorfold_* family in the shared panels.
+for title, metric in (("Decode throughput (tok/s)", "rate(tensorfold_completion_tokens_total"),
+                      ("Prefill throughput (tok/s)", "rate(tensorfold_cached_tokens_total"),
+                      ("Running requests", "tensorfold_requests_inflight"),
+                      ("Throughput by active model", "rate(tensorfold_prompt_tokens_total"),
+                      ("Completed request rate", "rate(tensorfold_requests_total")):
+    assert metric in panel_expressions[title], (title, metric)
 for title, metrics in required_panels.items():
     assert all(metric in panel_expressions[title] for metric in metrics)
 prompt_panel = next(panel for panel in cluster["panels"] if panel["title"] == "Prefill throughput (tok/s)")
@@ -570,7 +580,13 @@ validate_live_dashboard() {
     (expression("Host memory headroom (MemAvailable / gateway free)") | contains("node_textfile_mtime_seconds")) and
     (expression("Host memory headroom (MemAvailable / gateway free)") | contains("on()")) and
     (expression("Host memory headroom (MemAvailable / gateway free)") | contains("< 45")) and
-    (expression("Host memory headroom (MemAvailable / gateway free)") | contains("llamaswap_memory_free_bytes"))
+    (expression("Host memory headroom (MemAvailable / gateway free)") | contains("llamaswap_memory_free_bytes")) and
+    (expression("Decode throughput (tok/s)") | contains("tensorfold_completion_tokens_total")) and
+    (expression("Running requests") | contains("tensorfold_requests_inflight")) and
+    (expression("TensorFold requests, errors and rejections (DeepSeek-V4.1)") | contains("tensorfold_request_errors_total")) and
+    (expression("TensorFold slots in use (DeepSeek-V4.1)") | contains("tensorfold_requests_inflight")) and
+    (expression("TensorFold slots in use (DeepSeek-V4.1)") | contains("spark_serve_streams")) and
+    (expression("TensorFold requests in service (DeepSeek-V4.1)") | contains("tensorfold_decode_seconds_total"))
   ' <<<"$dashboard_response" >/dev/null
 }
 

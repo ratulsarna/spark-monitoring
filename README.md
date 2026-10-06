@@ -43,7 +43,8 @@ defines:
 
 To add a model, add or extend one `model_telemetry` row. Use
 `vllm:num_requests_running`, `sglang:num_running_reqs`,
-`llamacpp:requests_processing`, or `tensorfold:requests_running` for the
+`llamacpp:requests_processing`, `tensorfold:requests_running`, or
+`tensorfold_requests_inflight` (engine `tensorfold-health`) for the
 corresponding engine. Models sharing a
 job may use separate targets; an unloaded sibling target may be down. Models
 that share one endpoint belong in one row under `identities`, with

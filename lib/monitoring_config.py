@@ -20,6 +20,8 @@ ENGINES = {
     "sglang": "sglang:num_running_reqs",
     "llamacpp": "llamacpp:requests_processing",
     "tensorfold": "tensorfold:requests_running",
+    # TensorFold's CUDA health exporter (the DeepSeek-V4.1 image): tensorfold_* names.
+    "tensorfold-health": "tensorfold_requests_inflight",
 }
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,191}")
 JOB = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")

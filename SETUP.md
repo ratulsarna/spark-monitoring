@@ -66,8 +66,12 @@ prefill compute throughput. The MTP panel uses the rate of accepted draft
 tokens divided by the rate of drafted tokens, also grouped by node and model.
 
 The DeepSeek-V4.1 TensorFold image exports a different family, `tensorfold_*`,
-from TensorFold's CUDA health exporter. The shared throughput, running-request
-and completed-request panels include it. Three DeepSeek-V4.1 panels show
+from TensorFold's CUDA health exporter. It adds a request's tokens and decode
+time only when the request finishes, so a rate of its token counter spikes when
+a long reply lands. The decode panels show it as per-reply speed instead:
+completion tokens divided by decode seconds over the same window (15 minutes on
+the stat). The prefill panels leave it out, because its prefill time is not
+exported. The running-request and completed-request panels include it. Three DeepSeek-V4.1 panels show
 request, error and rejection rates with stalled and engine-fatal gauges; slots
 in use (`tensorfold_requests_inflight`, plus the lifecycle wrapper's
 `spark_serve_streams` from `/health`); and requests in service, the rate of

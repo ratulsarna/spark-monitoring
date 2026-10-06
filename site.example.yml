@@ -49,6 +49,17 @@ model_telemetry:
       job: sglang-node-a
       target: 127.0.0.1:32101
 
+  - node: node-a
+    identities:
+      - running: demo-tensorfold-model
+        model: demo-tensorfold-model
+    engine: tensorfold
+    proxy_port: 32103
+    activity_metric: tensorfold:requests_running
+    scrape:
+      job: tensorfold-node-a
+      target: 127.0.0.1:32103
+
   - node: node-b
     identities:
       - running: demo-llamacpp-model

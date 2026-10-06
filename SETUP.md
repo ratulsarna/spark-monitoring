@@ -49,9 +49,20 @@ The worker endpoint must export Prometheus metrics for one supported engine:
 | vLLM | `vllm:num_requests_running` |
 | SGLang | `sglang:num_running_reqs` |
 | llama.cpp | `llamacpp:requests_processing` |
+| TensorFold | `tensorfold:requests_running` |
 
 The gateway itself must also expose Prometheus metrics at the configured
 `gateway_scrape` target.
+
+The dashboard's `Prefill / prompt token rate` panel combines backend-specific
+prompt-rate metrics. TensorFold reports counters for prompt tokens and cached
+prompt tokens on finished requests. Its series is the rate of
+`tensorfold:prompt_tokens_total` minus the rate of
+`tensorfold_health:cached_tokens_total`, grouped by node and model. The cached
+counter is the cached subset of prompt tokens, so this is an uncached prompt
+token rate for completed requests; it is not a measurement of TensorFold
+prefill compute throughput. The MTP panel uses the rate of accepted draft
+tokens divided by the rate of drafted tokens, also grouped by node and model.
 
 ## Work safely
 
@@ -124,7 +135,7 @@ real private endpoints:
 curl -fsS https://spark-a.example.invalid/running | jq .
 curl -fsS https://spark-a.example.invalid/metrics | head
 curl -fsS https://spark-a.example.invalid/workers/model-a/metrics \
-  | grep -E '^(vllm:num_requests_running|sglang:num_running_reqs|llamacpp:requests_processing)'
+  | grep -E '^(vllm:num_requests_running|sglang:num_running_reqs|llamacpp:requests_processing|tensorfold:requests_running)'
 ```
 
 Repeat the checks for the second gateway if it has one. A worker target may use
@@ -215,7 +226,7 @@ Set each field from observed data:
 | `identities[].running` | Exact value from `/running[].model` |
 | `identities[].model` | Model label shown in Grafana |
 | `identities[].metric` | Raw worker metric label value when it differs from `running` |
-| `engine` | `vllm`, `sglang`, or `llamacpp` |
+| `engine` | `vllm`, `sglang`, `llamacpp`, or `tensorfold` |
 | `proxy_port` | Explicit port from `/running[].proxy` |
 | `activity_metric` | Required metric from the engine table above |
 | `scrape` | Worker metrics endpoint reachable from the monitoring host |

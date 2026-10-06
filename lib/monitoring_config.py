@@ -19,6 +19,7 @@ ENGINES = {
     "vllm": "vllm:num_requests_running",
     "sglang": "sglang:num_running_reqs",
     "llamacpp": "llamacpp:requests_processing",
+    "tensorfold": "tensorfold:requests_running",
 }
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,191}")
 JOB = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
@@ -261,12 +262,14 @@ def load_site(path):
     }
 
 
-def _job(name, scheme, path, static_configs, relabels=None):
+def _job(name, scheme, path, static_configs, relabels=None, honor_labels=False):
     result = {"job_name": name, "metrics_path": path, "static_configs": static_configs}
     if scheme != "http":
         result["scheme"] = scheme
     if relabels:
         result["metric_relabel_configs"] = relabels
+    if honor_labels:
+        result["honor_labels"] = True
     return result
 
 
@@ -325,6 +328,7 @@ def render_prometheus(site):
         _job(
             "node", "http", "/metrics",
             [{"targets": ["127.0.0.1:9100"], "labels": {"service": "host", "node": site["prometheus"]["node_exporter_node"]}}],
+            honor_labels=True,
         )
     )
     document = {

@@ -42,8 +42,9 @@ defines:
 - optional extra throughput scrapes for a single identity.
 
 To add a model, add or extend one `model_telemetry` row. Use
-`vllm:num_requests_running`, `sglang:num_running_reqs`, or
-`llamacpp:requests_processing` for the corresponding engine. Models sharing a
+`vllm:num_requests_running`, `sglang:num_running_reqs`,
+`llamacpp:requests_processing`, or `tensorfold:requests_running` for the
+corresponding engine. Models sharing a
 job may use separate targets; an unloaded sibling target may be down. Models
 that share one endpoint belong in one row under `identities`, with
 `model_label_source` naming the raw metric label that identifies the current

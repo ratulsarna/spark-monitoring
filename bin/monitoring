@@ -168,20 +168,45 @@ panel_expressions = {
     for panel in cluster["panels"]
 }
 required_panels = {
-    "Decode throughput (tok/s)": ("sglang:gen_throughput", "llamacpp:predicted_tokens_seconds", "vllm:generation_tokens_total"),
-    "Prefill throughput (tok/s)": ("sglang:realtime_tokens_total", "llamacpp:prompt_tokens_seconds", "vllm:prompt_tokens_by_source_total"),
-    "Completed request rate": ("sglang:num_requests_total", "vllm:e2e_request_latency_seconds_count"),
-    "Queued requests": ("sglang:num_queue_reqs", "llamacpp:requests_deferred", "vllm:num_requests_waiting"),
+    "Decode throughput (tok/s)": ("sglang:gen_throughput", "llamacpp:predicted_tokens_seconds", "vllm:generation_tokens_total", "tensorfold_health:completion_tokens_total"),
+    "Prefill throughput (tok/s)": ("sglang:realtime_tokens_total", "llamacpp:prompt_tokens_seconds", "vllm:prompt_tokens_by_source_total", "tensorfold:prompt_tokens_total", "tensorfold_health:cached_tokens_total"),
+    "Running requests": ("tensorfold:requests_running",),
+    "Completed request rate": ("sglang:num_requests_total", "vllm:e2e_request_latency_seconds_count", "tensorfold:request_latency_seconds_count"),
+    "Queued requests": ("sglang:num_queue_reqs", "llamacpp:requests_deferred", "vllm:num_requests_waiting", "tensorfold:requests_waiting"),
     "vLLM KV cache usage": ("vllm:kv_cache_usage_perc",),
-    "MTP acceptance": ("sglang:spec_accept_rate", "llamacpp:spec_decode_num_accepted_tokens_total", "vllm:spec_decode_num_accepted_tokens_total"),
+    "MTP acceptance": ("sglang:spec_accept_rate", "llamacpp:spec_decode_num_accepted_tokens_total", "vllm:spec_decode_num_accepted_tokens_total", "tensorfold:mtp_accepted_total", "tensorfold:mtp_drafted_total"),
+    "Throughput by active model": ("tensorfold:prompt_tokens_total", "tensorfold_health:cached_tokens_total"),
     "vLLM preemptions": ("vllm:num_preemptions_total",),
+    "TensorFold latency and TTFT (finished requests)": ("tensorfold:request_latency_seconds_sum", "tensorfold:time_to_first_token_seconds_bucket"),
+    "TensorFold KV pool and stream context occupancy": ("tensorfold_health:pool_free_tokens", "tensorfold:kv_cache_usage_ratio"),
+    "TensorFold KV pool capacity": ("tensorfold_health:pool_tokens", "tensorfold_health:context_length"),
+    "TensorFold streams by state": ("tensorfold_health:streams",),
+    "TensorFold rank/API health (fresh samples)": ("spark_serve_rank_up", "spark_serve_api_up", "spark_serve_probe_timestamp_seconds", "node_textfile_mtime_seconds"),
+    "Host memory headroom (MemAvailable / gateway free)": ("spark_serve_host_mem_available_bytes", "spark_serve_probe_timestamp_seconds", "node_textfile_mtime_seconds", "llamaswap_memory_free_bytes"),
 }
 for title, metrics in required_panels.items():
     assert all(metric in panel_expressions[title] for metric in metrics)
+prompt_panel = next(panel for panel in cluster["panels"] if panel["title"] == "Prefill throughput (tok/s)")
+prompt_description = prompt_panel.get("description", "").lower()
+assert "finished requests" in prompt_description
+assert "not a measurement of tensorfold prefill compute throughput" in prompt_description
+prompt_expression = panel_expressions["Prefill throughput (tok/s)"]
+assert "rate(tensorfold:prompt_tokens_total" in prompt_expression
+assert "rate(tensorfold_health:cached_tokens_total" in prompt_expression
+assert "on (node, model)" in prompt_expression and "clamp_min" in prompt_expression
+mtp_expression = panel_expressions["MTP acceptance"]
+assert "sum by (node, model)" in mtp_expression and "clamp_min" in mtp_expression and "rate(" in mtp_expression
+assert "rate(tensorfold:mtp_accepted_total" in mtp_expression
+assert "rate(tensorfold:mtp_drafted_total" in mtp_expression
+for title in ("Decode throughput (tok/s)", "Prefill throughput (tok/s)", "Running requests", "Queued requests"):
+    assert "vector(0)" not in panel_expressions[title]
+for title in ("TensorFold rank/API health (fresh samples)", "Host memory headroom (MemAvailable / gateway free)"):
+    assert "on(model,engine)" in panel_expressions[title]
+    assert "on(model,engine,node,rank)" not in panel_expressions[title]
 PY
 }
 validate() {
-  local prometheus_image
+  local prometheus_image compose_config node_exporter_command
   require_commands
   load_site_config
   render_runtime_files check || {
@@ -189,8 +214,16 @@ validate() {
     return 1
   }
   require_volumes
-  compose config --quiet
-  prometheus_image=$(compose config --format json | jq -er '.services.prometheus.image')
+  compose_config=$(compose config --format json)
+  prometheus_image=$(jq -er '.services.prometheus.image' <<<"$compose_config")
+  node_exporter_command=$(jq -cer '.services["node-exporter"].command' <<<"$compose_config")
+  jq -e '
+    index("--collector.textfile") != null and
+    index("--collector.textfile.directory=/host/run/spark-models/telemetry") != null
+  ' <<<"$node_exporter_command" >/dev/null || {
+    fail 'node-exporter textfile collector does not target the shared telemetry directory'
+    return 1
+  }
   docker image inspect "$prometheus_image" >/dev/null 2>&1 || {
     fail 'pinned Prometheus image is unavailable locally; install fetches the pinned images'
     return 1
@@ -476,8 +509,9 @@ qualify_active_workers() {
 validate_live_dashboard() {
   local dashboard_response=$1
   jq -e '
-    [.dashboard.panels[] | {title, expression: ([.targets[]?.expr] | join("\n"))}] as $panels |
+    [.dashboard.panels[] | {title, description, expression: ([.targets[]?.expr] | join("\n"))}] as $panels |
     def expression($title): $panels[] | select(.title == $title) | .expression;
+    def description($title): $panels[] | select(.title == $title) | .description;
     .meta.provisioned == true and
     .dashboard.uid == "spark-models" and
     .dashboard.title == "Model Serving" and
@@ -485,12 +519,58 @@ validate_live_dashboard() {
       .name == "model" and
       ((.query.query // .query) == "label_values({service=\"model-worker\",node=~\"$node\"}, model)")) and
     (expression("Decode throughput (tok/s)") | contains("vllm:generation_tokens_total")) and
+    (expression("Decode throughput (tok/s)") | contains("tensorfold_health:completion_tokens_total")) and
+    (expression("Decode throughput (tok/s)") | contains("vector(0)") | not) and
     (expression("Prefill throughput (tok/s)") | contains("vllm:prompt_tokens_by_source_total")) and
+    (expression("Prefill throughput (tok/s)") | contains("tensorfold:prompt_tokens_total")) and
+    (expression("Prefill throughput (tok/s)") | contains("tensorfold_health:cached_tokens_total")) and
+    (expression("Prefill throughput (tok/s)") | contains("rate(tensorfold:prompt_tokens_total")) and
+    (expression("Prefill throughput (tok/s)") | contains("rate(tensorfold_health:cached_tokens_total")) and
+    (expression("Prefill throughput (tok/s)") | contains("on (node, model)")) and
+    (expression("Prefill throughput (tok/s)") | contains("clamp_min")) and
+    (description("Prefill throughput (tok/s)") | ascii_downcase | contains("finished requests")) and
+    (description("Prefill throughput (tok/s)") | ascii_downcase | contains("not a measurement of tensorfold prefill compute throughput")) and
+    (expression("Prefill throughput (tok/s)") | contains("vector(0)") | not) and
+    (expression("Running requests") | contains("tensorfold:requests_running")) and
+    (expression("Running requests") | contains("vector(0)") | not) and
     (expression("Completed request rate") | contains("vllm:e2e_request_latency_seconds_count")) and
+    (expression("Completed request rate") | contains("tensorfold:request_latency_seconds_count")) and
     (expression("Queued requests") | contains("vllm:num_requests_waiting")) and
+    (expression("Queued requests") | contains("tensorfold:requests_waiting")) and
+    (expression("Queued requests") | contains("vector(0)") | not) and
     (expression("vLLM KV cache usage") | contains("vllm:kv_cache_usage_perc")) and
+    (expression("vLLM KV cache usage") | contains("vector(0)") | not) and
     (expression("MTP acceptance") | contains("vllm:spec_decode_num_accepted_tokens_total")) and
-    (expression("vLLM preemptions") | contains("vllm:num_preemptions_total"))
+    (expression("MTP acceptance") | contains("tensorfold:mtp_accepted_total")) and
+    (expression("MTP acceptance") | contains("tensorfold:mtp_drafted_total")) and
+    (expression("MTP acceptance") | contains("rate(tensorfold:mtp_accepted_total")) and
+    (expression("MTP acceptance") | contains("rate(tensorfold:mtp_drafted_total")) and
+    (expression("MTP acceptance") | contains("clamp_min")) and
+    (expression("MTP acceptance") | contains("sum by (node, model)")) and
+    (expression("Throughput by active model") | contains("tensorfold:prompt_tokens_total")) and
+    (expression("Throughput by active model") | contains("tensorfold_health:cached_tokens_total")) and
+    (expression("vLLM preemptions") | contains("vllm:num_preemptions_total")) and
+    (expression("TensorFold latency and TTFT (finished requests)") | contains("tensorfold:request_latency_seconds_sum")) and
+    (expression("TensorFold latency and TTFT (finished requests)") | contains("tensorfold:time_to_first_token_seconds_bucket")) and
+    (expression("TensorFold KV pool and stream context occupancy") | contains("tensorfold_health:pool_free_tokens")) and
+    (expression("TensorFold KV pool and stream context occupancy") | contains("tensorfold:kv_cache_usage_ratio")) and
+    (expression("TensorFold KV pool capacity") | contains("tensorfold_health:pool_tokens")) and
+    (expression("TensorFold KV pool capacity") | contains("tensorfold_health:context_length")) and
+    (expression("TensorFold streams by state") | contains("tensorfold_health:streams")) and
+    (expression("TensorFold rank/API health (fresh samples)") | contains("spark_serve_rank_up")) and
+    (expression("TensorFold rank/API health (fresh samples)") | contains("spark_serve_api_up")) and
+    (expression("TensorFold rank/API health (fresh samples)") | contains("spark_serve_probe_timestamp_seconds")) and
+    (expression("TensorFold rank/API health (fresh samples)") | contains("on(model,engine)")) and
+    (expression("TensorFold rank/API health (fresh samples)") | contains("node_textfile_mtime_seconds")) and
+    (expression("TensorFold rank/API health (fresh samples)") | contains("on()")) and
+    (expression("TensorFold rank/API health (fresh samples)") | contains("< 45")) and
+    (expression("Host memory headroom (MemAvailable / gateway free)") | contains("spark_serve_host_mem_available_bytes")) and
+    (expression("Host memory headroom (MemAvailable / gateway free)") | contains("spark_serve_probe_timestamp_seconds")) and
+    (expression("Host memory headroom (MemAvailable / gateway free)") | contains("on(model,engine)")) and
+    (expression("Host memory headroom (MemAvailable / gateway free)") | contains("node_textfile_mtime_seconds")) and
+    (expression("Host memory headroom (MemAvailable / gateway free)") | contains("on()")) and
+    (expression("Host memory headroom (MemAvailable / gateway free)") | contains("< 45")) and
+    (expression("Host memory headroom (MemAvailable / gateway free)") | contains("llamaswap_memory_free_bytes"))
   ' <<<"$dashboard_response" >/dev/null
 }
 
@@ -525,9 +605,16 @@ status() {
         .Config.Labels["com.docker.compose.project.config_files"] == $compose) and
       any($mounts[]; .Type == "volume" and .Name == $prom and .Destination == "/prometheus") and
       any($mounts[]; .Type == "volume" and .Name == $graf and .Destination == "/var/lib/grafana") and
+      any($mounts[]; .Type == "bind" and .Source == "/" and .Destination == "/host" and .RW == false) and
       all($mounts[] | select(.Type == "bind" and .Destination != "/host"); .Source | startswith($root))
     ' <<<"$containers")
   [[ $mounts_ok == true ]] || fail 'live mounts or Compose ownership do not match this repository'
+  jq -e '
+    [.[] | select(.Name == "/spark-monitoring-node-exporter")] as $node |
+    ($node | length) == 1 and
+    ($node[0].Config.Cmd | index("--collector.textfile") != null) and
+    ($node[0].Config.Cmd | index("--collector.textfile.directory=/host/run/spark-models/telemetry") != null)
+  ' <<<"$containers" >/dev/null || fail 'live node-exporter textfile collector is not configured for telemetry'
 
   curl -fsS --max-time 10 "$prometheus_url/-/ready" >/dev/null
   curl -fsS --max-time 10 "$grafana_url/api/health" >/dev/null
@@ -579,7 +666,7 @@ reload_stack() {
   verify_serve_prerequisite
   render_runtime_files write
   validate
-  compose up -d --no-deps --force-recreate prometheus grafana
+  compose up -d --no-deps --force-recreate prometheus grafana node-exporter
   wait_ready
   status
 }
